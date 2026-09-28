@@ -585,6 +585,39 @@ async def patch_trip(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post(
+    "/trips/{trip_id}/refresh/jobs", status_code=202, dependencies=[Depends(require_write)]
+)
+async def queue_trip_refresh(
+    trip_id: UUID,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> dict:
+    """Re-plan a stored trip in the background and return immediately.
+
+    A refresh re-runs every provider, so it takes as long as the original plan — tens of
+    seconds. The synchronous endpoint below still exists for callers that want a blocking
+    response, but a browser should use this one: the same work, with steps to watch and the
+    ability to cancel.
+
+    The job is indistinguishable from a planning job to the polling and streaming endpoints,
+    which is the point — a client needs one progress mechanism, not two. It is marked
+    ``kind: "refresh"`` with a ``target_trip_id`` so the UI can label it 重新规划 and keep
+    showing the existing trip underneath.
+    """
+    try:
+        job = trip_service(request).queue_refresh(
+            trip_id,
+            owner_id=_resolved_owner(request, principal),
+            jobs=planning_jobs(request),
+        )
+    except TripNotFoundError as exc:
+        # Raised before any job exists: a refresh of a missing (or another owner's) trip
+        # fails here rather than becoming a job that dies a minute later.
+        raise HTTPException(status_code=404, detail="trip not found") from exc
+    return job_as_dict(job)
+
+
 @router.post("/trips/{trip_id}/refresh", response_model=Trip, dependencies=[Depends(require_write)])
 async def refresh_trip(
     trip_id: UUID,

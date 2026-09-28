@@ -23,20 +23,12 @@
  * step; if no step is running, nothing moves.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { ApiError } from "../../lib/api-client";
-import {
-  cancelPlanningJob,
-  formatDuration,
-  getPlanningJob,
-  isTerminal,
-  progressSummary,
-  stepLabel,
-  streamPlanningJob,
-  submitPlanningJob,
-  type PlanningJob,
-} from "../../lib/planning-jobs";
+import { describeJobError, useJobProgress } from "../../lib/use-job-progress";
+import { submitPlanningJob } from "../../lib/planning-jobs";
+import { JobProgressPanel } from "./job-progress";
 
 export type PlanFormValues = {
   destination: string;
@@ -64,55 +56,13 @@ const PACES = [
   { value: "packed", label: "紧凑", hint: "尽量多走" },
 ];
 
-function StepList({ job }: { job: PlanningJob }) {
-  if (!job.steps.length) {
-    return (
-      <div className="muted" style={{ fontSize: 13 }}>
-        正在装配数据源…
-      </div>
-    );
-  }
-  return (
-    <ol className="step-list">
-      {job.steps.map((step, index) => {
-        const running = !step.finished_at && isTerminal(job.status) === false;
-        return (
-          <li
-            // Steps repeat their names across runs, so the index is part of the key.
-            key={`${step.name}:${index}`}
-            className={`step-item ${step.finished_at ? "step-done" : "step-active"}`}
-          >
-            <span className="step-mark" aria-hidden="true">
-              {step.finished_at ? "✓" : running ? "◐" : "·"}
-            </span>
-            <span className="step-name">{stepLabel(step.name)}</span>
-            {step.detail && <span className="step-detail">{step.detail}</span>}
-            {/* The real measured duration, or nothing. A placeholder would imply a
-                measurement that has not happened. */}
-            <span className="step-time">
-              {step.finished_at ? formatDuration(step.duration_ms) : "进行中"}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
 export function PlanForm({ apiUrl }: { apiUrl: string }) {
   const [values, setValues] = useState<PlanFormValues>(EMPTY);
-  const [job, setJob] = useState<PlanningJob | null>(null);
-  const [error, setError] = useState("");
   const [needsKey, setNeedsKey] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const streamAbort = useRef<AbortController | null>(null);
-
-  useEffect(
-    () => () => {
-      streamAbort.current?.abort();
-    },
-    [],
-  );
+  const [submitError, setSubmitError] = useState("");
+  // The following, polling-fallback and cancel logic is shared with the trip page's
+  // re-plan button, so both screens agree on what a closed stream means.
+  const { job, busy, error, notice, follow, cancel, reset } = useJobProgress(apiUrl);
 
   const update = useCallback(
     <K extends keyof PlanFormValues>(key: K, value: PlanFormValues[K]) =>
@@ -123,10 +73,9 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!values.destination.trim() || !values.start_date || !values.end_date) return;
-    setBusy(true);
-    setError("");
+    setSubmitError("");
     setNeedsKey(false);
-    setJob(null);
+    reset();
 
     const profile: Record<string, unknown> = {
       destination: values.destination.trim(),
@@ -146,70 +95,10 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
 
     try {
       const created = await submitPlanningJob(profile, { queueTrip: true });
-      setJob(created);
       await follow(created.id);
     } catch (reason) {
       setNeedsKey(reason instanceof ApiError && (reason.isUnauthorized || reason.isForbidden));
-      setError(describe(reason, apiUrl));
-      setBusy(false);
-    }
-  }
-
-  /** Stream to the end, falling back to polling if streaming is unavailable. */
-  async function follow(jobId: string) {
-    const controller = new AbortController();
-    streamAbort.current = controller;
-    try {
-      await streamPlanningJob(
-        jobId,
-        (update) => {
-          setJob(update);
-          if (isTerminal(update.status)) setBusy(false);
-        },
-        controller.signal,
-      );
-      // The stream closes at a terminal state, but a proxy may close it early — so the
-      // final state is always read explicitly rather than assumed from the stream.
-      const settled = await getPlanningJob(jobId);
-      setJob(settled);
-      if (isTerminal(settled.status)) setBusy(false);
-      else await poll(jobId);
-    } catch (reason) {
-      if (controller.signal.aborted) return; // the user navigated away
-      // Streaming is a convenience. Losing it must not lose the job.
-      setError(`进度流不可用，改为轮询：${describe(reason, apiUrl)}`);
-      await poll(jobId);
-    }
-  }
-
-  async function poll(jobId: string) {
-    for (;;) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      if (streamAbort.current?.signal.aborted) return;
-      try {
-        const current = await getPlanningJob(jobId);
-        setJob(current);
-        if (isTerminal(current.status)) {
-          setBusy(false);
-          return;
-        }
-      } catch (reason) {
-        setError(describe(reason, apiUrl));
-        setBusy(false);
-        return;
-      }
-    }
-  }
-
-  async function cancel() {
-    if (!job) return;
-    try {
-      setJob(await cancelPlanningJob(job.id));
-    } catch (reason) {
-      setError(describe(reason, apiUrl));
-    } finally {
-      streamAbort.current?.abort();
-      setBusy(false);
+      setSubmitError(describeJobError(reason, apiUrl));
     }
   }
 
@@ -315,6 +204,16 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
               {error}
             </div>
           )}
+          {submitError && (
+            <div className="error" style={{ margin: "14px 0" }} role="status">
+              {submitError}
+            </div>
+          )}
+          {needsKey && (
+            <div className="muted" style={{ marginTop: 8 }}>
+              密钥在<a href="/settings">设置</a>里填写。
+            </div>
+          )}
 
           <div className="credential-help" style={{ marginTop: 16 }}>
             <button
@@ -334,60 +233,25 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
       </section>
 
       {job && (
-        <section className="card catalog-panel" style={{ marginTop: 18 }}>
-          <div className="api-key-head">
-            <div>
-              <div className="eyebrow">PLANNING / PROGRESS</div>
-              <h2 style={{ margin: "6px 0 4px" }}>{progressSummary(job)}</h2>
-            </div>
-            <div className="provider-badges">
-              <span className={`status-chip status-${job.status}`}>
-                用时 {formatDuration(job.elapsed_ms)}
-              </span>
-            </div>
-          </div>
-
-          <StepList job={job} />
-
-          {job.status === "failed" && (
-            <div className="error" style={{ marginTop: 12 }} role="alert">
-              {/* The server's own message, not a paraphrase: it is the only thing that
-                  makes the failure actionable. */}
-              规划失败：{job.error}
-            </div>
-          )}
-
-          {job.status === "cancelled" && (
-            <div className="notice" style={{ marginTop: 12 }} role="status">
-              已取消。这次规划没有产生行程。
-            </div>
-          )}
-
-          {succeeded && (
-            <div className="notice" style={{ marginTop: 12 }} role="status">
-              已完成。{" "}
-              <a href={`/trips/${job.trip_id}`} style={{ color: "inherit", textDecoration: "underline" }}>
-                查看行程 →
-              </a>
-            </div>
-          )}
-
-          <p className="muted" style={{ margin: "14px 0 0", fontSize: 12, lineHeight: 1.6 }}>
-            每一步的耗时都是真实测量的：没有进度动画，因为动画会在什么都没发生时继续前进。
-            某一步慢，就在这里显示为慢。
-          </p>
-        </section>
+        <JobProgressPanel
+          job={job}
+          onCancel={cancel}
+          notice={notice}
+          successContent={
+            succeeded ? (
+              <div className="notice" style={{ marginTop: 12 }} role="status">
+                已完成。{" "}
+                <a
+                  href={`/trips/${job.trip_id}`}
+                  style={{ color: "inherit", textDecoration: "underline" }}
+                >
+                  查看行程 →
+                </a>
+              </div>
+            ) : null
+          }
+        />
       )}
     </>
   );
-}
-
-function describe(reason: unknown, apiUrl: string): string {
-  if (reason instanceof ApiError) {
-    if (reason.status === 0) return `无法连接 API（${apiUrl}）：${reason.detail}`;
-    if (reason.isUnauthorized) return "需要先在设置页填写接口密钥。";
-    if (reason.isForbidden) return "当前密钥缺少 trip:write 权限。";
-    return reason.detail;
-  }
-  return reason instanceof Error ? reason.message : "规划请求失败";
 }

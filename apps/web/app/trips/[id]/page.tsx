@@ -6,6 +6,9 @@ import type { CSSProperties } from "react";
 import { useTripStore } from "../../../lib/trip-store";
 import type { Attribution } from "../../../lib/trip-store";
 import { freshnessClass, freshnessLabel, formatTimestamp } from "../../../lib/freshness";
+import { submitRefreshJob } from "../../../lib/planning-jobs";
+import { useJobProgress } from "../../../lib/use-job-progress";
+import { JobProgressPanel } from "../../components/job-progress";
 
 type AnyRecord = Record<string, any>;
 type Trip = AnyRecord;
@@ -161,8 +164,61 @@ function SourceChip({ source, estimated = false }: { source?: AnyRecord; estimat
   return <><span className="source-chip">{estimated ? "系统计算" : source?.source ?? "来源未知"}</span><span className={freshnessClass(source, estimated)}>{freshnessLabel(source, estimated)}</span></>;
 }
 
+/**
+ * Re-run every source for a trip that already exists.
+ *
+ * This is the honest form of "refresh": the facts on the page were fetched at a recorded
+ * time and the traveller needs to know whether they are still current. Re-querying takes as
+ * long as the original plan — the same providers, the same tens of seconds — so it goes
+ * through the job API rather than a blocking request that would freeze the browser. The
+ * existing trip stays on screen while it runs, which is the point: the comparison is the
+ * useful part, not a spinner.
+ */
+function RefreshPanel({ tripId, onRefreshed }: { tripId: string; onRefreshed: () => Promise<void> }) {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+  const { job, busy, error, notice, follow, cancel } = useJobProgress(apiUrl);
+
+  async function start() {
+    try {
+      const created = await submitRefreshJob(tripId);
+      await follow(created.id);
+      // Only after the job reached a terminal state, so a failed refresh leaves the
+      // previously loaded trip exactly as it was rather than blanking it.
+      await onRefreshed();
+    } catch {
+      /* useJobProgress keeps the visible error */
+    }
+  }
+
+  return (
+    <>
+      <div className="credential-help" style={{ marginTop: 10 }}>
+        <button className="button secondary" type="button" onClick={start} disabled={busy}>
+          {busy ? "正在重新拉取…" : "重新拉取数据 →"}
+        </button>
+        <span className="muted" style={{ fontSize: 12 }}>
+          会用当前配置的数据源重新查询一遍，耗时与首次规划相当。
+        </span>
+      </div>
+      {error && !job && (
+        <div className="error" style={{ marginTop: 10 }} role="status">
+          {error}
+        </div>
+      )}
+      {job && (
+        <JobProgressPanel
+          job={job}
+          title={job.status === "succeeded" ? "重新拉取完成" : "正在重新拉取数据"}
+          onCancel={cancel}
+          notice={notice}
+        />
+      )}
+    </>
+  );
+}
+
 export default function TripWorkspacePage({ params }: { params: { id: string } }) {
-  const { trip, messages, loading, busy, error, lastResult, weather, attributions, needsCredentials, send } = useTripStore(params.id);
+  const { trip, messages, loading, busy, error, lastResult, weather, attributions, needsCredentials, send, reload } = useTripStore(params.id);
   const [input, setInput] = useState("");
   async function submit(event: FormEvent) { event.preventDefault(); if (!input.trim()) return; const message = input; setInput(""); try { await send(message); } catch { /* store keeps the visible error state */ } }
   const selectedOffer = useMemo(() => trip?.preview?.hotel_offers?.find((offer: AnyRecord) => offer.id === trip.selected_hotel_offer_id), [trip]);
@@ -181,6 +237,7 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
     <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link><Link href="/ingestions">内容摄取</Link><Link href="/settings">设置</Link></nav></header>
     <section className="trip-header"><div><div className="eyebrow">TRIP / VERSION {trip.current_version}</div><h1>{trip.profile.destination}</h1><div className="trip-meta"><span>{trip.profile.start_date} — {trip.profile.end_date}</span><span>{trip.profile.travelers} 位旅行者</span><span>{trip.profile.pace === "relaxed" ? "轻松节奏" : "平衡节奏"}</span></div></div><div className="budget-head"><strong>{formatMoney(budget?.total)} <span>/ {formatMoney(budget?.budget_limit)}</span></strong><span>{budget?.over_budget ? "已超预算" : `剩余 ${formatMoney(budget?.remaining)}`}</span></div></section>
     {error && <div className="error" style={{ marginTop: 18 }}>{error}</div>}
+    <RefreshPanel tripId={params.id} onRefreshed={reload} />
     {lastResult?.change && <section className="diff"><h3>已保存 Version {lastResult.version} · 本次修改</h3><p>动作：{lastResult.change.action}</p><p>预算影响：{lastResult.change.impact?.difference ? `${lastResult.change.impact.difference}（程序计算）` : "已重新计算"}</p><p>所有变化均来自结构化 Revision 与 Change History。</p></section>}
     {lastResult && lastResult.warnings?.length > 0 && <div className="notice" style={{ margin: "18px 0" }}>{lastResult.warnings.join("；")}</div>}
     <StaleFactBanner facts={trip.preview?.stale_facts ?? []} />

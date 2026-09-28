@@ -364,3 +364,144 @@ def test_the_stream_carries_real_steps_when_the_job_is_still_running(client, app
     # A whole snapshot: the client needs no prior state to render it.
     for field in ("id", "status", "profile", "steps", "elapsed_ms", "is_cancellable"):
         assert field in first, f"{field} missing from the streamed snapshot"
+
+
+# -- re-planning an existing trip ----------------------------------------------
+
+
+def _create_trip(client, key: str) -> dict:
+    response = client.post("/api/v1/trips", json=_profile(), headers=_auth(key))
+    assert response.status_code in {200, 201}, response.text
+    return response.json()
+
+
+def test_a_refresh_is_queued_as_a_job_and_not_run_inline(client, app):
+    """A refresh costs what a plan costs, so it gets the same treatment.
+
+    The failure this guards is the inconsistency: leaving a refresh synchronous while
+    planning is asynchronous makes the operation whose duration is hardest to predict the
+    one with no feedback at all.
+    """
+    key = _key(app)
+    trip = _create_trip(client, key)
+
+    response = client.post(f"/api/v1/trips/{trip['id']}/refresh/jobs", headers=_auth(key))
+
+    assert response.status_code == 202, response.text
+    payload = response.json()
+    assert payload["id"]
+    # Distinguished from a first plan, and pointing at the trip it re-plans: a client has to
+    # render 重新规划 over the existing trip rather than as a new one appearing.
+    assert payload["kind"] == "refresh"
+    assert payload["target_trip_id"] == trip["id"]
+
+
+def test_a_refresh_job_is_pollable_and_streamable_like_any_other(client, app):
+    """One progress mechanism, not two.
+
+    Reusing the planning endpoints is the whole reason this is a job rather than a bespoke
+    long-poll: a client should not need a second code path to watch a refresh.
+    """
+    key = _key(app)
+    trip = _create_trip(client, key)
+    job = client.post(f"/api/v1/trips/{trip['id']}/refresh/jobs", headers=_auth(key)).json()
+
+    settled = _settle(client, key, job["id"])
+    assert settled["status"] == "succeeded", settled.get("error")
+    # The refreshed trip keeps its identity: same id, so history and links survive.
+    assert settled["trip_id"] == trip["id"]
+    assert settled["target_trip_id"] == trip["id"]
+    assert settled["kind"] == "refresh"
+
+    # And it shows up in the same list as planning jobs.
+    listed = client.get("/api/v1/planning/jobs", headers=_auth(key)).json()
+    assert job["id"] in {item["id"] for item in listed}
+
+
+def test_a_completed_refresh_advances_the_trip_version(client, app):
+    """The refresh has to have actually re-planned, not just reported success."""
+    key = _key(app)
+    trip = _create_trip(client, key)
+    before = trip["current_version"]
+
+    job = client.post(f"/api/v1/trips/{trip['id']}/refresh/jobs", headers=_auth(key)).json()
+    _settle(client, key, job["id"])
+
+    after = client.get(f"/api/v1/trips/{trip['id']}", headers=_auth(key)).json()
+    assert after["current_version"] > before, "the stored trip was not updated"
+
+
+def test_refreshing_a_missing_trip_fails_immediately_without_creating_a_job(client, app):
+    """A 404 up front, not a job that dies a minute later.
+
+    Two reasons this matters, and they are different. A caller gets the answer straight away
+    instead of watching a progress bar for a minute before learning the trip does not exist.
+    And no job is created for an id that was never real, so the jobs list cannot be used to
+    probe which trip ids exist.
+    """
+    key = _key(app)
+    response = client.post(
+        "/api/v1/trips/00000000-0000-4000-8000-000000000000/refresh/jobs", headers=_auth(key)
+    )
+
+    assert response.status_code == 404
+    assert client.get("/api/v1/planning/jobs", headers=_auth(key)).json() == []
+
+
+def test_refreshing_another_owners_trip_is_a_404_and_creates_no_job(client, app):
+    """Same rule as trips and notes: 403 would confirm the id exists."""
+    owner_a, owner_b = _key(app, "owner-a"), _key(app, "owner-b")
+    trip = _create_trip(client, owner_a)
+
+    response = client.post(f"/api/v1/trips/{trip['id']}/refresh/jobs", headers=_auth(owner_b))
+
+    assert response.status_code == 404
+    assert client.get("/api/v1/planning/jobs", headers=_auth(owner_b)).json() == []
+    # The owner's own trip is untouched.
+    assert client.get(f"/api/v1/trips/{trip['id']}", headers=_auth(owner_a)).status_code == 200
+
+
+def test_a_refresh_job_reports_the_pipeline_steps_and_not_only_its_own(client, app):
+    """The refresh's progress must come from the pipeline, not just from the wrapper.
+
+    This pins a bug that shipped: ``refresh`` accepted a ``progress`` argument and never
+    passed it to ``preview``, so a refresh job reported ``reload_trip`` and then nothing at
+    all for the following minute. The display looked like a working progress panel — one
+    finished step, a running job — while the only visible stage was the trivial one. A
+    client cannot detect that from the outside, so it has to be asserted here.
+    """
+    key = _key(app)
+    trip = _create_trip(client, key)
+    job = client.post(f"/api/v1/trips/{trip['id']}/refresh/jobs", headers=_auth(key)).json()
+
+    settled = _settle(client, key, job["id"])
+    assert settled["status"] == "succeeded", settled.get("error")
+
+    steps = [step["name"] for step in settled["steps"]]
+    # The wrapper's own step.
+    assert "reload_trip" in steps
+    # And the pipeline it is supposed to be reporting on. Any of these coming from
+    # build_preview proves progress was actually threaded through.
+    pipeline_steps = {"collect_places", "build_itinerary", "calculate_routes", "room_offers"}
+    assert pipeline_steps & set(steps), f"the refresh reported no pipeline progress: {steps}"
+    # Every step obeys the same rule as a first plan: closed means measured, open means unknown.
+    for step in settled["steps"]:
+        if step["finished_at"]:
+            assert step["duration_ms"] is not None, f"closed step {step['name']} has no duration"
+        else:
+            assert step["duration_ms"] is None, f"open step {step['name']} claims a duration"
+
+
+def test_the_synchronous_refresh_still_works(client, app):
+    """Kept deliberately: a caller that wants a blocking response still gets one.
+
+    Removing it would be a breaking change for no honesty gain — the job endpoint is the
+    better default, not the only option.
+    """
+    key = _key(app)
+    trip = _create_trip(client, key)
+
+    response = client.post(f"/api/v1/trips/{trip['id']}/refresh", headers=_auth(key))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["current_version"] > trip["current_version"]

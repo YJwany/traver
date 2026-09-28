@@ -21,6 +21,7 @@ from travel_api.services.aggregation import build_preview
 from travel_api.services.budget_engine import BudgetEngine
 from travel_api.services.freshness import FreshnessService
 from travel_api.services.owner_context import resolve_owner
+from travel_api.services.planning_jobs import JobKind
 from travel_api.services.route_optimizer import RouteOptimizer
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,53 @@ class TripService:
             budget_strategy=str(budget_strategy),
         )
 
+    def queue_refresh(
+        self,
+        trip_id: UUID,
+        *,
+        owner_id: str | None = None,
+        jobs=None,
+    ):
+        """Re-plan a stored trip in the background, reporting the same progress as a plan.
+
+        This exists because a refresh costs what a plan costs — it re-queries every provider
+        — so the one operation whose duration is hardest to predict was also the one with no
+        feedback at all. The synchronous endpoint stays for callers that want a blocking
+        response; this is the same work with something to watch.
+
+        The trip is loaded *before* the job is created. Two reasons, both about not lying:
+        a refresh of a trip that does not exist (or belongs to someone else) fails with a
+        404 straight away instead of becoming a job that dies a minute later, and the
+        profile the job plans for is the stored one rather than anything the caller sent —
+        the caller supplies only an id, so there is nothing else it could be.
+
+        Raises ``RuntimeError`` when no registry is wired, matching ``queue``: a caller that
+        asked for a job must not receive a request that blocks for tens of seconds instead.
+        """
+        registry = jobs if jobs is not None else self.jobs
+        if registry is None:
+            raise RuntimeError("planning job registry is not configured")
+
+        # Raises TripNotFoundError for an unknown or another owner's trip.
+        trip = self.get(trip_id, owner_id=owner_id)
+        strategy = trip.budget.strategy if trip.budget else BudgetStrategyName.BALANCED
+
+        async def runner(job):
+            progress = registry.progress(job)
+            await _maybe_step(progress, "reload_trip", "读取已保存的行程与偏好")
+            await _maybe_finish_step(progress)
+            refreshed = await self.refresh(trip_id, owner_id=owner_id, progress=progress)
+            return refreshed.id
+
+        return registry.submit(
+            trip.profile,
+            runner,
+            owner_id=owner_id,
+            budget_strategy=str(strategy),
+            kind=JobKind.REFRESH,
+            target_trip_id=trip_id,
+        )
+
     def get(self, trip_id: UUID, *, owner_id: str | None = None) -> Trip:
         with self.uow_factory() as uow:
             trip = uow.trips.get(trip_id, owner_id=owner_id)
@@ -260,12 +308,26 @@ class TripService:
             )
         return result
 
-    async def refresh(self, trip_id: UUID, *, owner_id: str | None = None) -> Trip:
+    async def refresh(
+        self,
+        trip_id: UUID,
+        *,
+        owner_id: str | None = None,
+        progress=None,
+    ) -> Trip:
+        """Re-run every provider for a stored trip and save the new plan.
+
+        ``progress`` is threaded through because a refresh does exactly the same work as a
+        first plan — it re-queries every source — and therefore takes the same tens of
+        seconds. Reporting progress for one and not the other would make the slower-looking
+        operation the one with no feedback.
+        """
         trip = self.get(trip_id, owner_id=owner_id)
         preview = await self.preview(
             trip.profile,
             trip.budget.strategy if trip.budget else BudgetStrategyName.BALANCED,
             owner_id=owner_id,
+            progress=progress,
         )
         next_trip = trip.model_copy(
             update={

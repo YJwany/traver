@@ -24,6 +24,16 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+/**
+ * Whether a job creates a trip or re-plans one.
+ *
+ * The server reports this rather than leaving the client to infer it from `target_trip_id`
+ * being set: the two mean different things in the UI (a new trip appears, versus the trip
+ * already on screen being replaced), and inferring intent from a field that means something
+ * else produces a screen that is right by accident.
+ */
+export type JobKind = "plan" | "refresh";
+
 export type JobStep = {
   name: string;
   detail: string;
@@ -35,11 +45,19 @@ export type JobStep = {
 export type PlanningJob = {
   id: string;
   status: JobStatus;
+  kind: JobKind;
   profile: Record<string, unknown>;
   budget_strategy: string;
   steps: JobStep[];
   current_step: string | null;
   trip_id: string | null;
+  /**
+   * For a refresh, the trip being re-planned — known before the work starts.
+   *
+   * Distinct from `trip_id`, which is only the result. A client that just queued a refresh
+   * needs the id it asked about, because the trip on screen is still the one being replaced.
+   */
+  target_trip_id: string | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -59,6 +77,7 @@ export type PlanningJob = {
  */
 export const STEP_LABELS: Record<string, string> = {
   resolve_sources: "装配可用数据源",
+  reload_trip: "读取已保存的行程与偏好",
   collect_places: "采集酒店、餐厅、景点、天气",
   room_offers: "查询房型与报价",
   enrich_attractions: "补充景点简介",
@@ -199,6 +218,20 @@ export async function submitPlanningJob(
 
 export function getPlanningJob(jobId: string): Promise<PlanningJob> {
   return jobRequest<PlanningJob>(`/api/v1/planning/jobs/${jobId}`);
+}
+
+/**
+ * Queue a re-plan of a stored trip, returning the job immediately.
+ *
+ * A refresh re-runs every provider, so it costs what a plan costs. Without this the trip
+ * page could only offer a blocking request that freezes the browser for tens of seconds,
+ * which is exactly the problem the job API exists to solve.
+ *
+ * A trip that does not exist — or belongs to someone else — is rejected here with a 404
+ * rather than becoming a job that dies later, so the caller gets the answer immediately.
+ */
+export function submitRefreshJob(tripId: string): Promise<PlanningJob> {
+  return jobRequest<PlanningJob>(`/api/v1/trips/${tripId}/refresh/jobs`, { method: "POST" });
 }
 
 export function cancelPlanningJob(jobId: string): Promise<PlanningJob> {

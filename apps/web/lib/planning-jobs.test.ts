@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   formatDuration,
   isTerminal,
   progressSummary,
   stepLabel,
+  submitRefreshJob,
   STEP_LABELS,
   type JobStatus,
   type PlanningJob,
@@ -23,11 +24,13 @@ function job(overrides: Partial<PlanningJob> = {}): PlanningJob {
   return {
     id: "job-1",
     status: "running",
+    kind: "plan",
     profile: {},
     budget_strategy: "balanced",
     steps: [],
     current_step: null,
     trip_id: null,
+    target_trip_id: null,
     error: null,
     created_at: "2026-09-28T10:00:00Z",
     started_at: "2026-09-28T10:00:01Z",
@@ -171,5 +174,56 @@ describe("progressSummary", () => {
         expect(progressSummary(job({ status, steps }))).not.toContain("已完成");
       }
     }
+  });
+});
+
+describe("re-planning an existing trip", () => {
+  it("posts to the trip's own refresh endpoint, not the planning collection", async () => {
+    // The distinction is not cosmetic: posting to /planning/jobs would create a *second*
+    // trip instead of re-planning this one, which is data loss dressed up as a refresh.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      text: async () =>
+        JSON.stringify({
+          id: "job-9",
+          status: "queued",
+          kind: "refresh",
+          profile: {},
+          budget_strategy: "balanced",
+          steps: [],
+          current_step: null,
+          trip_id: null,
+          target_trip_id: "trip-9",
+          error: null,
+          created_at: "2026-09-28T10:00:00Z",
+          started_at: null,
+          finished_at: null,
+          elapsed_ms: null,
+          cancel_requested: false,
+          is_cancellable: true,
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const queued = await submitRefreshJob("trip-9");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/v1/trips/trip-9/refresh/jobs");
+    expect(String(url)).not.toContain("/api/v1/planning/jobs");
+    expect(init.method).toBe("POST");
+    // The trip being re-planned is known before the work starts, unlike trip_id.
+    expect(queued.target_trip_id).toBe("trip-9");
+    expect(queued.trip_id).toBeNull();
+    expect(queued.kind).toBe("refresh");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("names the extra step a refresh emits", () => {
+    // The server publishes reload_trip for a refresh. An unmapped step would render as the
+    // raw identifier in the one panel a waiting user is reading.
+    expect(stepLabel("reload_trip")).toBe("读取已保存的行程与偏好");
+    expect(stepLabel("reload_trip")).not.toContain("_");
   });
 });

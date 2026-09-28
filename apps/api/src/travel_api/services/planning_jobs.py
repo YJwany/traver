@@ -44,6 +44,21 @@ from travel_api.domain.models import TripProfile
 logger = logging.getLogger(__name__)
 
 
+class JobKind(StrEnum):
+    """What the job is doing, because the two take the same time and mean different things.
+
+    A refresh re-runs every provider for a trip that already exists, so it costs the same
+    tens of seconds as a first plan — and the client has to render it differently ("重新规划
+    杭州 3 天", with the existing trip still readable underneath) rather than as a new trip
+    appearing from nowhere. Deriving that from ``target_trip_id`` being set would work but
+    would leave the client to infer intent from a field that means something else.
+    """
+
+    PLAN = "plan"
+    #: Re-planning an existing trip, keeping its id and revision history.
+    REFRESH = "refresh"
+
+
 class JobStatus(StrEnum):
     """Where a planning job is.
 
@@ -99,6 +114,12 @@ class PlanningJob(BaseModel):
     status: JobStatus = JobStatus.QUEUED
     profile: TripProfile
     budget_strategy: str = "balanced"
+    #: Whether this plans a new trip or re-plans an existing one.
+    kind: JobKind = JobKind.PLAN
+    #: For a refresh: the trip being re-planned. Known before the work starts, unlike
+    #: ``trip_id``, which is only the *result*. Both are reported because a client that has
+    #: just queued a refresh needs the id it asked about, not only the id it gets back.
+    target_trip_id: UUID | None = None
     steps: list[JobStep] = Field(default_factory=list)
     #: The created trip, once there is one. Absent while running, and absent when the job
     #: failed — never a placeholder, because a placeholder id would look like a trip.
@@ -163,13 +184,21 @@ class PlanningJobRegistry:
         *,
         owner_id: str | None = None,
         budget_strategy: str = "balanced",
+        kind: JobKind | str = JobKind.PLAN,
+        target_trip_id: UUID | None = None,
     ) -> PlanningJob:
         """Queue a job and start it on the current event loop.
 
         Returns immediately. The caller gets an id to poll or stream; the work happens in
         the background, which is the entire point.
         """
-        job = PlanningJob(profile=profile, owner_id=owner_id, budget_strategy=budget_strategy)
+        job = PlanningJob(
+            profile=profile,
+            owner_id=owner_id,
+            budget_strategy=budget_strategy,
+            kind=JobKind(kind),
+            target_trip_id=target_trip_id,
+        )
         self._jobs[job.id] = job
         self._evict_if_needed()
         task = asyncio.create_task(self._run(job, runner))
@@ -367,6 +396,7 @@ def job_as_dict(job: PlanningJob) -> dict[str, Any]:
     return {
         "id": job.id,
         "status": str(job.status),
+        "kind": str(job.kind),
         "profile": job.profile.model_dump(mode="json"),
         "budget_strategy": job.budget_strategy,
         "steps": [
@@ -381,6 +411,7 @@ def job_as_dict(job: PlanningJob) -> dict[str, Any]:
         ],
         "current_step": job.current_step,
         "trip_id": str(job.trip_id) if job.trip_id else None,
+        "target_trip_id": str(job.target_trip_id) if job.target_trip_id else None,
         "error": job.error,
         "created_at": job.created_at.isoformat(),
         "started_at": job.started_at.isoformat() if job.started_at else None,
