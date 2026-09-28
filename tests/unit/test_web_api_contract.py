@@ -352,6 +352,145 @@ def test_every_place_resolution_status_has_its_own_sentence():
     )
 
 
+FRESHNESS_LIB = Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "freshness.ts"
+TRIP_STORE_LIB = Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "trip-store.ts"
+TRIP_PAGE = (
+    Path(__file__).resolve().parents[2] / "apps" / "web" / "app" / "trips" / "[id]" / "page.tsx"
+)
+
+
+def test_the_web_knows_every_freshness_basis_the_server_can_report():
+    """``ObservationBasis`` in the API against the four constants in ``freshness.ts``.
+
+    This is the 时效性 hard requirement's own vocabulary, and the one where a rename is
+    quietest. The web writes the bases as named constants and branches on them; anything it
+    does not recognise falls to the ``default:`` branch, which says 数据时间未知. That is the
+    honest answer for a datum whose age really is unknown — so if ``provider_reported`` were
+    renamed, every source that *does* publish a timestamp would start reporting 数据时间未知,
+    the panel would look careful and conservative, and the feature would be gone.
+
+    The values are compared, not the constant names: the names are the web's business, the
+    strings on the wire are the contract.
+    """
+    from travel_api.domain.models import ObservationBasis
+
+    source = FRESHNESS_LIB.read_text(encoding="utf-8")
+    web_values = set(
+        re.findall(r'^export const BASIS_[A-Z_]+ = "([a-z_]+)";', source, re.MULTILINE)
+    )
+    assert web_values, f"could not find the BASIS_ constants in {FRESHNESS_LIB.name}"
+
+    expected = {member.value for member in ObservationBasis}
+    assert web_values == expected, (
+        "the web and the API disagree about freshness bases. "
+        f"web only: {sorted(web_values - expected)}; api only: {sorted(expected - web_values)}"
+    )
+
+
+def test_the_web_and_the_api_agree_which_basis_makes_the_data_age_known():
+    """The rule itself, not just the vocabulary, has to be the same on both sides.
+
+    The 时效性 rule is: only a source that *stamped* its own datum lets you speak about the
+    age of the data; a live computation and a silent source both tell you only that we asked
+    recently. The API encodes it once (``ObservationBasis.age_is_about_the_data``) and the web
+    encodes it again (``dataAgeIsKnown``), because one is Python and one is TypeScript.
+
+    If the two ever disagree, the disagreement is invisible on both sides: each is internally
+    consistent, and the web's panel would simply be reassuring about a datum the server knows
+    is old. So the web's rule is read and compared to the API's.
+    """
+    from travel_api.domain.models import ObservationBasis
+
+    source = FRESHNESS_LIB.read_text(encoding="utf-8")
+    body = source.split("export function dataAgeIsKnown", 1)[1].split("}", 1)[0]
+    referenced = set(re.findall(r"BASIS_[A-Z_]+", body))
+    assert referenced, "could not read `dataAgeIsKnown`; the check would be vacuous"
+
+    # Map the web's constant names back to their string values.
+    constants = dict(
+        re.findall(r'^export const (BASIS_[A-Z_]+) = "([a-z_]+)";', source, re.MULTILINE)
+    )
+    web_known = {constants[name] for name in referenced if name in constants}
+
+    api_known = {member.value for member in ObservationBasis if member.age_is_about_the_data}
+    assert web_known == api_known, (
+        "the web and the API disagree about which freshness basis makes the data's age known. "
+        f"web treats these as known: {sorted(web_known)}; the API: {sorted(api_known)}"
+    )
+
+
+def test_the_web_knows_every_itinerary_item_type_the_server_can_produce():
+    """A type the web cannot name is printed as its identifier on every itinerary line.
+
+    ``typeNames[item.item_type] ?? item.item_type`` is the fallback, so an unknown type shows
+    ``transfer`` in the middle of a Chinese itinerary rather than nothing — visible, and easy
+    to mistake for a deliberate technical term.
+    """
+    from travel_api.domain.models import ItineraryItemType
+
+    source = TRIP_PAGE.read_text(encoding="utf-8")
+    match = re.search(r"const typeNames: Record<string, string> = \{(.*?)\};", source, re.DOTALL)
+    assert match, f"could not find `typeNames` in {TRIP_PAGE.name}"
+    declared = set(re.findall(r"([a-z_]+):", match.group(1)))
+    assert declared, "an empty table means the scan is wrong and this check is vacuous"
+
+    expected = {member.value for member in ItineraryItemType}
+    assert declared == expected, (
+        "the itinerary shows item types the API cannot produce, or cannot name one it can. "
+        f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
+    )
+
+
+def test_the_web_knows_every_conversation_role_the_server_can_send():
+    """A role the web cannot name makes the chat history **empty**, not merely mislabelled.
+
+    The history is filtered to ``role === "user" || role === "assistant"`` before rendering, so
+    a server-side rename of either role does not produce a wrong label — it produces a panel
+    with nothing in it, and the traveller concludes their conversation was lost. That is a
+    strictly worse failure than an unlabelled chip, which is why this one is checked too.
+    """
+    from travel_api.domain.models import ConversationRole
+
+    source = TRIP_STORE_LIB.read_text(encoding="utf-8")
+    # `Message` is an object type written on a single line, so its `role` member is found by
+    # scoping the search to the `Message` declaration and then reading the union inside it —
+    # anchoring on line starts would silently find nothing.
+    message_match = re.search(r"^type Message = \{(.*?)\};", source, re.MULTILINE | re.DOTALL)
+    assert message_match, f"could not find `Message` in {TRIP_STORE_LIB.name}"
+    role_match = re.search(r"\brole:\s*([^;]+);", message_match.group(1))
+    assert role_match, f"could not find `role` inside `Message` in {TRIP_STORE_LIB.name}"
+    roles = set(re.findall(r'"([a-z_]+)"', role_match.group(1)))
+    assert roles, "reading the role union produced nothing, so the check would be vacuous"
+
+    expected = {member.value for member in ConversationRole}
+    assert roles == expected, (
+        "the web and the API disagree about conversation roles. "
+        f"web only: {sorted(roles - expected)}; api only: {sorted(expected - roles)}"
+    )
+
+
+def test_the_web_knows_every_extraction_confidence_the_server_can_report():
+    """``confidenceLabel``'s ``default:`` returns the raw value, so a new level is a raw word.
+
+    Confidence wording is deliberately about the reading rather than the truth (识别明确 /
+    识别一般 / 仅为线索), which means it cannot be derived from the value on the client — the
+    mapping has to exist on both sides.
+    """
+    from travel_api.domain.ingestion import ExtractionConfidence
+
+    source = INGESTIONS_LIB.read_text(encoding="utf-8")
+    body = source.split("export function confidenceLabel", 1)[1]
+    handled = set(re.findall(r'case "([a-z_]+)":', body.split("\n}", 1)[0]))
+    assert handled, "could not read `confidenceLabel`'s cases; the check would be vacuous"
+
+    expected = {member.value for member in ExtractionConfidence}
+    assert handled == expected, (
+        "the web cannot word every confidence the API can report. "
+        f"unhandled: {sorted(expected - handled)}; handled but not in the API: "
+        f"{sorted(handled - expected)}"
+    )
+
+
 def test_the_web_knows_exactly_the_fact_kinds_the_server_can_produce():
     """``FACT_KINDS`` in the web client against ``FactKind`` in the API.
 

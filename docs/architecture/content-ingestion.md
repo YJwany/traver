@@ -145,6 +145,25 @@ Traver 自己不带数据。而最详细的旅行信息往往不在任何 API �
 | `tests/integration/test_ingested_places_in_plan.py` | 真实 HTTP：定位成功、**不变成景点也不进某一天**、引用进入计划、950 公里外的同名报 `elsewhere`、已匹配的提及不被查询、无来源时报 `not_attempted`、属主隔离 |
 | `scripts/probe_place_resolution.py` | 对着假地理编码器跑一遍完整判定，打印每个地名的四种结果 |
 
+### 跨语言的词汇表：一个反复出现的缺口
+
+`PlaceResolutionStatus` 这四个值同时存在于两侧——API 的枚举与前端 `ingested-places.ts` 的联合类型——而两侧之间没有任何东西比对它们。这类缺口在本仓库已经出现过八次（`packed` 配速、`FactKind`、`JobStatus`、`JobKind`、进度步骤名、`ObservationBasis`、`ItineraryItemType`、`ConversationRole`、`ExtractionConfidence`），形状完全一样：**两种语言无法共享常量，于是各存一份；每一侧的兜底都让缺失看起来像正常工作**。
+
+四种兜底，四种失败方式，全都不报错：
+
+| 词汇表 | 认不出时的行为 | 用户看到 |
+| --- | --- | --- |
+| 进度步骤名 | 显示原始名字 | 中文进度条中间冒出一个 `resolve_places` |
+| `JobStatus` | `isTerminal` 返回 false | 作业永远「进行中」，轮询永不停 |
+| `JobKind` | 落到 `else` 分支 | 重规划被描述成新行程 |
+| 聊天角色 | 被 `role === "user" \|\| "assistant"` 过滤掉 | **空白面板**，像是对话丢了 |
+| `ExtractionConfidence` | `default` 回显原始值 | 中文标签群里一个 `low` |
+| `ObservationBasis` | 落到「数据时间未知」 | 每个真的盖了时间戳的来源都变成「未知」——看起来更谨慎，实际功能没了 |
+
+最后一条尤其危险：它的兜底恰好是一句**诚实且保守**的话，所以一个把 `provider_reported` 改名的人会看到界面「更谨慎了」，而实际上时效性功能已经消失。
+
+因此 `tests/unit/test_web_api_contract.py` 逐个读源码比对。它是文本扫描、很粗糙，这一点写在文件开头——但它正是唯一能看见真实缺陷的东西。`scripts/probe_shared_vocabularies.py` 是可重复的发现手段：把 API 的 18 个 `StrEnum` 与前端源码逐一比对，报出「被复制到前端、却没有任何契约检查」的词汇表，并以非零退出码结束。新增枚举或前端表格后跑它。
+
 ### 还没做
 
 - 距离用的是**直线距离**。它对「是不是同一个城市」足够，对「走过去多久」不够——所以这里不从它推算任何通行时间。通行时间需要一个路径服务，那是另一个能力。
