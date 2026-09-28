@@ -140,6 +140,11 @@ class TripService:
         owner_id: str | None = None,
         progress=None,
     ) -> Trip:
+        # Resolved once, then used for both the plan and the write. Passing the raw argument
+        # to one and the ambient value to the other is how a trip gets built with one owner's
+        # credentials and stored under nobody: the row would then be invisible to the caller
+        # who just created it, because reads resolve the same way this does.
+        owner_id = resolve_owner(owner_id)
         preview = await self.preview(profile, budget_strategy, owner_id=owner_id, progress=progress)
         await _maybe_step(progress, "save_trip", "写入行程与实体")
         trip = Trip(
@@ -177,6 +182,11 @@ class TripService:
         registry = jobs if jobs is not None else self.jobs
         if registry is None:
             raise RuntimeError("planning job registry is not configured")
+
+        # Captured here, on the request's own task, for the same reason ``create`` resolves
+        # it: a background task outlives the request, so the ambient value must be read while
+        # it still describes the caller rather than whoever is being served when it resumes.
+        owner_id = resolve_owner(owner_id)
 
         async def runner(job):
             # The owner is the one captured at submit time, never a later ambient value:
@@ -249,7 +259,7 @@ class TripService:
 
     def get(self, trip_id: UUID, *, owner_id: str | None = None) -> Trip:
         with self.uow_factory() as uow:
-            trip = uow.trips.get(trip_id, owner_id=owner_id)
+            trip = uow.trips.get(trip_id, owner_id=resolve_owner(owner_id))
         if trip is None:
             # A trip owned by somebody else is reported as missing, never as
             # forbidden: a distinct 403 would confirm the id exists.
@@ -264,11 +274,11 @@ class TripService:
         owner_id: str | None = None,
     ) -> list[Trip]:
         with self.uow_factory() as uow:
-            return uow.trips.list(limit, offset, owner_id=owner_id)
+            return uow.trips.list(limit, offset, owner_id=resolve_owner(owner_id))
 
     def count(self, *, owner_id: str | None = None) -> int:
         with self.uow_factory() as uow:
-            return uow.trips.count(owner_id=owner_id)
+            return uow.trips.count(owner_id=resolve_owner(owner_id))
 
     def owner_of(self, trip_id: UUID) -> str | None:
         with self.uow_factory() as uow:

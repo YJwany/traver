@@ -22,6 +22,8 @@ TripService / Decision / Budget / Route
 
 工具返回 JSON 结构，不返回大段自然语言。ToolDefinition 同时声明 input schema、output schema、permission 和 read/write kind。Read 工具默认可调用，Write 工具必须由服务层根据用户明确意图传入 allow_write=True。单轮最多 20 次工具调用、同一工具最多 5 次。
 
+工具 handler 的签名**不包含 owner**：这是对外发布的 OpenAI 工具契约，加参数等于把内部关注点泄进模型可见的 schema。属主因此由环境上下文承载（`services/owner_context.py`），HTTP 路由在调用期间显式绑定已认证的调用者，`TripService` 在未收到显式属主时读取它。这条链路必须完整——`/tools/{name}` 曾经既没有认证依赖、服务层也不读环境属主，于是 handler 在仓储层以 `owner_id=None`（「不过滤」）查行程。**契约里没有的位置，必须有人补上，否则缺失会以「不过滤」的形式静默通过。**
+
 AI 执行顺序是：读取当前 Trip 与近期会话 → RequirementAgent 补齐需求 → Read tools → Decision/Budget/Route → 必要时 Write tool → 重新从数据库读取最终 Trip → 生成解释。模型生成的 JSON 不是事实层，也不能直接写入数据库。
 
 正式适配器是 `OpenAICompatibleAdapter`，业务层只依赖 `AIProvider`。它记录 model、token usage、latency、estimated cost 和 success/error；API Key 永远不进入会话内容或数据库。

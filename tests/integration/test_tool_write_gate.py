@@ -6,6 +6,14 @@ could never fire over HTTP. The only pre-existing test
 (``test_ai_tools.py::test_write_tool_requires_explicit_permission``) exercised the
 registry directly, which is exactly the layer that was *not* broken — so the
 bypass survived. These tests drive the endpoint itself.
+
+A second bypass lived on the same route and is pinned at the bottom of the file: the route
+had **no authentication dependency at all**. ``confirm_write`` is a confirmation, not a
+permission, so an anonymous caller could pass ``?confirm_write=true`` and the registry's
+write guard would fire on ``allow_write=True`` — every gate satisfied and no credential
+required. Worse, the tool handlers take a trip id and no owner (their signatures are the
+published OpenAI tool contract), so they looked the trip up with owner ``None``, which in
+the repository means "no filter": any owner's trip could be read by id, and mutated.
 """
 
 from __future__ import annotations
@@ -14,15 +22,17 @@ import pytest
 from fastapi.testclient import TestClient
 from travel_api.config import Settings
 from travel_api.main import create_app
+from travel_api.services.auth import SCOPE_READ
 from travel_api.services.tool_registry import ToolDefinition, ToolRegistry
 
 
-def _hermetic_app(tmp_path):
+def _hermetic_app(tmp_path, *, auth_enabled: bool = False):
     return create_app(
         Settings(
             app_env="test",
             database_url=f"sqlite:///{tmp_path / 'tools.db'}",
             auto_create_schema=True,
+            auth_enabled=auth_enabled,
             provider_retry_count=0,
             free_providers_enabled=False,
             mock_provider_enabled=True,
@@ -167,6 +177,122 @@ def test_tool_listing_exposes_permissions(tmp_path):
     tools = {item["name"]: item for item in response.json()}
     assert tools["revise_trip"]["permission"] == "trip:write"
     assert tools["search_hotels"]["permission"] == "trip:read"
+
+
+# -- the route is authenticated, and scoped to the caller --------------------
+
+
+def _auth(app, owner: str, *, scopes: tuple[str, ...] = ()) -> dict[str, str]:
+    key, _ = app.state.auth_service.mint(owner, label=owner, scopes=scopes)
+    return {"Authorization": f"Bearer {key}"}
+
+
+def test_an_anonymous_caller_cannot_read_another_owners_trip_through_a_tool(tmp_path, trip_body):
+    """The route had no auth dependency, so the tools' owner-less lookups ran unfiltered.
+
+    ``GET /trips/{id}`` correctly returned 401 for the same request, which is what made the
+    hole easy to miss: the protected door was locked and this one was not.
+    """
+    app = _hermetic_app(tmp_path, auth_enabled=True)
+    with TestClient(app) as client:
+        alice = _auth(app, "alice")
+        created = client.post("/api/v1/trips", json=trip_body, headers=alice)
+        assert created.status_code == 200, created.text
+        trip_id = created.json()["id"]
+
+        # Alice can read her own budget through the tool: authentication must not cost the
+        # owner the feature.
+        hers = client.post("/api/v1/tools/get_budget", json={"trip_id": trip_id}, headers=alice)
+        assert hers.status_code == 200, hers.text
+
+        # A stranger with no credential gets the same answer as the protected route.
+        anonymous = client.post("/api/v1/tools/get_budget", json={"trip_id": trip_id})
+        assert anonymous.status_code == 401, anonymous.text
+        assert trip_id not in anonymous.text
+
+
+def test_an_anonymous_caller_cannot_mutate_another_owners_trip_through_a_tool(tmp_path, trip_body):
+    """``confirm_write`` is a confirmation, not a permission — the exact confusion here."""
+    app = _hermetic_app(tmp_path, auth_enabled=True)
+    with TestClient(app) as client:
+        alice = _auth(app, "alice")
+        trip_id = client.post("/api/v1/trips", json=trip_body, headers=alice).json()["id"]
+        before = client.get(f"/api/v1/trips/{trip_id}", headers=alice).json()
+
+        anonymous = client.post(
+            "/api/v1/tools/revise_trip?confirm_write=true",
+            json={"trip_id": trip_id, "action": "replace_hotel", "constraints": {}},
+        )
+        assert anonymous.status_code == 401, anonymous.text
+
+        after = client.get(f"/api/v1/trips/{trip_id}", headers=alice).json()
+        assert after["current_version"] == before["current_version"], (
+            "an unauthenticated request changed a stored trip"
+        )
+
+
+def test_another_owners_trip_is_a_404_through_a_tool_not_a_500(tmp_path, trip_body):
+    """The handler raises a ``LookupError``, which the route did not map.
+
+    Left unmapped it becomes a 500 — and a 500 is a worse answer than a 404: it says an id
+    exists and something went wrong with it, which is the existence disclosure the 404/403
+    rule exists to avoid.
+    """
+    app = _hermetic_app(tmp_path, auth_enabled=True)
+    with TestClient(app) as client:
+        alice = _auth(app, "alice")
+        bob = _auth(app, "bob")
+        trip_id = client.post("/api/v1/trips", json=trip_body, headers=alice).json()["id"]
+
+        for suffix in ("", "?confirm_write=true"):
+            response = client.post(
+                f"/api/v1/tools/get_budget{suffix}",
+                json={"trip_id": trip_id},
+                headers=bob,
+            )
+            assert response.status_code == 404, response.text
+            assert "成都" not in response.text
+
+        # An id that was never issued answers identically.
+        unknown = client.post(
+            "/api/v1/tools/get_budget",
+            json={"trip_id": "00000000-0000-0000-0000-000000000000"},
+            headers=bob,
+        )
+        assert unknown.status_code == 404, unknown.text
+
+
+def test_a_read_only_key_cannot_reach_a_write_tool_by_confirming_it(tmp_path, trip_body):
+    """The scope comes from the tool's own ``kind``, not from a fixed route dependency.
+
+    A single fixed ``require_read`` on the route would let a read-only key write; a fixed
+    ``require_write`` would stop read-only keys from reading. The registry already knows
+    which is which, so the route asks it.
+    """
+    app = _hermetic_app(tmp_path, auth_enabled=True)
+    with TestClient(app) as client:
+        owner = _auth(app, "alice")
+        reader = _auth(app, "alice", scopes=(SCOPE_READ,))
+        trip_id = client.post("/api/v1/trips", json=trip_body, headers=owner).json()["id"]
+
+        # Reads are allowed with the read scope.
+        assert (
+            client.post(
+                "/api/v1/tools/get_budget", json={"trip_id": trip_id}, headers=reader
+            ).status_code
+            == 200
+        )
+
+        refused = client.post(
+            "/api/v1/tools/revise_trip?confirm_write=true",
+            json={"trip_id": trip_id, "action": "replace_hotel", "constraints": {}},
+            headers=reader,
+        )
+        assert refused.status_code == 403, refused.text
+        assert "trip:write" in refused.json()["detail"]
+
+        # And the refusal happened before the handler ran.
+        assert client.get(f"/api/v1/trips/{trip_id}", headers=owner).json()["current_version"] == 1
 
 
 # -- registry-level guard still holds ---------------------------------------

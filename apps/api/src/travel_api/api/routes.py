@@ -27,7 +27,7 @@ from travel_api.providers.manifest import (
     manifest_for,
     uncovered_aspects,
 )
-from travel_api.services.auth import Principal
+from travel_api.services.auth import SCOPE_READ, SCOPE_WRITE, Principal
 from travel_api.services.credentials import (
     SOURCE_ENV,
     SOURCE_STORED,
@@ -36,6 +36,7 @@ from travel_api.services.credentials import (
     configured_credentials,
 )
 from travel_api.services.export import content_disposition, to_ics, to_markdown
+from travel_api.services.owner_context import acting_as
 from travel_api.services.planning_jobs import job_as_dict
 from travel_api.services.trip_service import (
     ConcurrentTripUpdateError,
@@ -51,17 +52,25 @@ def trip_service(request: Request):
     return request.app.state.trip_service
 
 
-def _resolved_owner(request: Request, principal: Principal) -> str | None:
-    """Owner filter, or ``None`` when the API is running without auth.
+def _resolved_owner(principal: Principal) -> str:
+    """The owner every read and write of this request is scoped to.
 
-    Returning ``None`` means "no filter" and is reachable only when
-    ``auth_enabled`` is false — the single-user local-development mode, which
-    ``/api/v1/health`` advertises. With auth on this is always a real owner id,
-    so no query can accidentally read across tenants.
+    One rule, and it is the principal's: ``AUTH_ENABLED=false`` does not make the owner
+    ``None``, it makes the principal the configured ``AUTH_ANONYMOUS_OWNER``
+    (``local-dev`` by default, stated in ``.env.example`` and returned by
+    ``get_principal``). A synthetic single-user owner is still a real owner id.
+
+    This used to return ``None`` in the unauthenticated mode, meaning "no filter", and that
+    was a bug rather than a convenience. A saved note was written with no owner while the
+    planner looked the caller's notes up under the owner the middleware had bound for the
+    same request — one request, two answers to "whose is this" — so a note saved in the
+    default local mode could never reach a plan. Credentials were keyed on the principal all
+    along and kept working, which is exactly why nobody noticed: the two answers only
+    disagree in the one place that reads data the same request wrote.
+
+    Repositories still accept ``owner_id=None`` for "no filter", which scripts and the CLI
+    use; no HTTP route asks for it any more.
     """
-    auth_service = getattr(request.app.state, "auth_service", None)
-    if auth_service is None or not auth_service.enabled:
-        return None
     return principal.owner_id
 
 
@@ -344,20 +353,36 @@ async def call_tool(
     tool_name: str,
     payload: dict,
     request: Request,
+    principal: Principal = Depends(get_principal),
     confirm_write: bool = False,
 ) -> dict:
-    """Invoke a registered tool.
+    """Invoke a registered tool as the caller, with the scope the tool itself declares.
 
-    Write tools are gated: this route used to pass ``allow_write=True``
-    unconditionally, which meant the registry's ``PermissionError`` guard could
-    never fire over HTTP and any caller could mutate an arbitrary trip. The
-    caller must now opt in explicitly with ``?confirm_write=true``, and a write
-    without it is refused rather than silently performed.
+    Two separate gates, because they answer different questions and only one of them was
+    ever here:
+
+    * **Who are you** — added because this route had no authentication dependency at all,
+      which made the other gate meaningless. It also has to decide *what* it hands the
+      caller: the tool handlers take a trip id and no owner, because their signatures are
+      the published OpenAI tool contract, so they resolve the owner from the ambient
+      context. The middleware does bind it, but this route now binds it from the principal
+      it just authenticated, so the answer does not depend on middleware ordering. A caller
+      with no credential used to reach ``trip_service.get(trip_id)`` with owner ``None`` —
+      "no filter" — and could read, and with ``?confirm_write=true`` mutate, any owner's
+      trip by id.
+
+    * **Did you mean it** — the explicit ``confirm_write=true`` opt-in, which is a
+      confirmation rather than a permission: a read-only key must not reach a write tool by
+      confirming it.
     """
     try:
         definition = request.app.state.tool_registry.get(tool_name)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    required = SCOPE_WRITE if definition.kind == "write" else SCOPE_READ
+    if not principal.can(required):
+        raise HTTPException(status_code=403, detail=f"API key lacks required scope: {required}")
 
     if definition.kind == "write" and not confirm_write:
         raise HTTPException(
@@ -369,9 +394,18 @@ async def call_tool(
         )
 
     try:
-        return await request.app.state.tool_registry.call(
-            tool_name, payload, allow_write=confirm_write
-        )
+        # The owner is bound explicitly for the duration of the call rather than trusted to
+        # whatever the request happens to carry, so the tools below this line can only see
+        # the caller's own data.
+        with acting_as(principal.owner_id):
+            return await request.app.state.tool_registry.call(
+                tool_name, payload, allow_write=confirm_write
+            )
+    except TripNotFoundError as exc:
+        # 404 rather than 403 for another owner's trip, and not an unhandled LookupError:
+        # a traceback here would be a 500 that says "something exists but failed", which is
+        # the leak this route was fixed to close.
+        raise HTTPException(status_code=404, detail="trip not found") from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:
@@ -420,7 +454,7 @@ async def submit_planning_job(
     "created" would promise a trip that may yet fail.
     """
     trip_service_instance = trip_service(request)
-    owner = _resolved_owner(request, principal)
+    owner = _resolved_owner(principal)
     registry = planning_jobs(request)
     if not queue_trip:
         # A preview-only job: useful for trying a destination before committing to it,
@@ -447,16 +481,14 @@ async def list_planning_jobs(
     request: Request, principal: Principal = Depends(get_principal)
 ) -> list[dict]:
     registry = planning_jobs(request)
-    return [
-        job_as_dict(job) for job in registry.list_for_owner(_resolved_owner(request, principal))
-    ]
+    return [job_as_dict(job) for job in registry.list_for_owner(_resolved_owner(principal))]
 
 
 @router.get("/planning/jobs/{job_id}", dependencies=[Depends(require_read)])
 async def get_planning_job(
     job_id: str, request: Request, principal: Principal = Depends(get_principal)
 ) -> dict:
-    job = planning_jobs(request).get(job_id, owner_id=_resolved_owner(request, principal))
+    job = planning_jobs(request).get(job_id, owner_id=_resolved_owner(principal))
     if job is None:
         # 404 rather than 403 for another owner's job, same as trips and notes.
         raise HTTPException(status_code=404, detail="job not found")
@@ -468,7 +500,7 @@ async def cancel_planning_job(
     job_id: str, request: Request, principal: Principal = Depends(get_principal)
 ) -> dict:
     """Ask a job to stop. Idempotent: cancelling a finished job is not an error."""
-    job = planning_jobs(request).cancel(job_id, owner_id=_resolved_owner(request, principal))
+    job = planning_jobs(request).cancel(job_id, owner_id=_resolved_owner(principal))
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
     return job_as_dict(job)
@@ -496,7 +528,7 @@ async def stream_planning_job(
     from fastapi.responses import StreamingResponse
 
     registry = planning_jobs(request)
-    owner = _resolved_owner(request, principal)
+    owner = _resolved_owner(principal)
     job = registry.get(job_id, owner_id=owner)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -541,7 +573,7 @@ async def create_trip(
     request: Request,
     principal: Principal = Depends(get_principal),
 ) -> Trip:
-    return await trip_service(request).create(profile, owner_id=_resolved_owner(request, principal))
+    return await trip_service(request).create(profile, owner_id=_resolved_owner(principal))
 
 
 @router.get("/trips", response_model=list[Trip], dependencies=[Depends(require_read)])
@@ -551,7 +583,7 @@ async def list_trips(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[Trip]:
-    return trip_service(request).list(limit, offset, owner_id=_resolved_owner(request, principal))
+    return trip_service(request).list(limit, offset, owner_id=_resolved_owner(principal))
 
 
 @router.get("/trips/{trip_id}", response_model=Trip, dependencies=[Depends(require_read)])
@@ -561,7 +593,7 @@ async def get_trip(
     principal: Principal = Depends(get_principal),
 ) -> Trip:
     try:
-        return trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        return trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
 
@@ -573,7 +605,7 @@ async def patch_trip(
     request: Request,
     principal: Principal = Depends(get_principal),
 ) -> Trip:
-    owner = _resolved_owner(request, principal)
+    owner = _resolved_owner(principal)
     try:
         return await trip_service(request).patch(
             trip_id, patch, owner_id=owner, expected_version=patch.expected_version
@@ -609,7 +641,7 @@ async def queue_trip_refresh(
     try:
         job = trip_service(request).queue_refresh(
             trip_id,
-            owner_id=_resolved_owner(request, principal),
+            owner_id=_resolved_owner(principal),
             jobs=planning_jobs(request),
         )
     except TripNotFoundError as exc:
@@ -626,9 +658,7 @@ async def refresh_trip(
     principal: Principal = Depends(get_principal),
 ) -> Trip:
     try:
-        return await trip_service(request).refresh(
-            trip_id, owner_id=_resolved_owner(request, principal)
-        )
+        return await trip_service(request).refresh(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     except ConcurrentTripUpdateError as exc:
@@ -644,9 +674,7 @@ async def recalculate_trip(
     principal: Principal = Depends(get_principal),
 ) -> Trip:
     try:
-        return await trip_service(request).refresh(
-            trip_id, owner_id=_resolved_owner(request, principal)
-        )
+        return await trip_service(request).refresh(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     except ConcurrentTripUpdateError as exc:
@@ -666,7 +694,7 @@ async def revise_trip(
 ) -> TripRevisionResult:
     try:
         return await trip_service(request).revise(
-            trip_id, revision, owner_id=_resolved_owner(request, principal)
+            trip_id, revision, owner_id=_resolved_owner(principal)
         )
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
@@ -683,7 +711,7 @@ async def get_budget(
     principal: Principal = Depends(get_principal),
 ) -> dict:
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return trip.budget.model_dump(mode="json") if trip.budget else {}
@@ -696,7 +724,7 @@ async def get_itinerary(
     principal: Principal = Depends(get_principal),
 ) -> dict:
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return trip.itinerary.model_dump(mode="json")
@@ -709,7 +737,7 @@ async def get_sources(
     principal: Principal = Depends(get_principal),
 ) -> list[dict]:
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return [
@@ -725,9 +753,7 @@ async def get_snapshots(
     principal: Principal = Depends(get_principal),
 ) -> list[dict]:
     try:
-        return trip_service(request).snapshots(
-            trip_id, owner_id=_resolved_owner(request, principal)
-        )
+        return trip_service(request).snapshots(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
 
@@ -739,7 +765,7 @@ async def get_changes(
     principal: Principal = Depends(get_principal),
 ) -> list[dict]:
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return [item.model_dump(mode="json") for item in trip.change_history]
@@ -773,7 +799,7 @@ async def export_trip_markdown(
 ) -> Response:
     """The full record: itinerary, limits, budget and every source with both of its times."""
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return _export_response(
@@ -792,7 +818,7 @@ async def export_trip_calendar(
 ) -> Response:
     """The plan as a calendar, for the one artifact that ends up on a phone."""
     try:
-        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(principal))
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return _export_response(
@@ -832,9 +858,7 @@ async def create_ingestion(
     always "what did you get from it" — and showing the evidence is what lets the
     traveller disagree with a reading immediately rather than after it reaches a plan.
     """
-    ingestion = ingestion_service(request).ingest(
-        payload, owner_id=_resolved_owner(request, principal)
-    )
+    ingestion = ingestion_service(request).ingest(payload, owner_id=_resolved_owner(principal))
     return ingestion.model_dump(mode="json")
 
 
@@ -847,7 +871,7 @@ async def list_ingestions(
     return [
         item.model_dump(mode="json")
         for item in ingestion_service(request).list(
-            owner_id=_resolved_owner(request, principal), limit=limit
+            owner_id=_resolved_owner(principal), limit=limit
         )
     ]
 
@@ -858,9 +882,7 @@ async def get_ingestion(
     request: Request,
     principal: Principal = Depends(get_principal),
 ) -> dict:
-    found = ingestion_service(request).get(
-        ingestion_id, owner_id=_resolved_owner(request, principal)
-    )
+    found = ingestion_service(request).get(ingestion_id, owner_id=_resolved_owner(principal))
     if found is None:
         # Also the answer for a note owned by somebody else: confirming that an id
         # exists under another owner would leak its existence.
@@ -874,9 +896,7 @@ async def delete_ingestion(
     request: Request,
     principal: Principal = Depends(get_principal),
 ) -> dict:
-    deleted = ingestion_service(request).delete(
-        ingestion_id, owner_id=_resolved_owner(request, principal)
-    )
+    deleted = ingestion_service(request).delete(ingestion_id, owner_id=_resolved_owner(principal))
     if not deleted:
         raise HTTPException(status_code=404, detail="ingestion not found")
     return {"deleted": True}
@@ -902,7 +922,7 @@ async def ai_chat(
 ) -> AIChatResult:
     try:
         return await request.app.state.travel_ai_service.chat(
-            payload, owner_id=_resolved_owner(request, principal)
+            payload, owner_id=_resolved_owner(principal)
         )
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
@@ -924,7 +944,7 @@ async def get_conversation(
 ) -> list[ConversationMessage]:
     try:
         return request.app.state.travel_ai_service.conversation(
-            trip_id, owner_id=_resolved_owner(request, principal)
+            trip_id, owner_id=_resolved_owner(principal)
         )
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc

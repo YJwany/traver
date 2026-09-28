@@ -341,3 +341,70 @@ def test_a_deleted_note_stops_appearing_in_the_plan(client, app):
 
     client.delete(f"/api/v1/ingestions/{created['id']}", headers=_auth(key))
     assert _preview(client, key)["ingested_notes"] == []
+
+
+def test_the_default_local_mode_attributes_a_request_to_its_configured_owner(tmp_path):
+    """The mode every fresh clone runs in, and the one where this feature was broken.
+
+    ``AUTH_ENABLED=false`` does not mean "nobody owns this". It means the principal is the
+    configured ``AUTH_ANONYMOUS_OWNER`` (``local-dev``, stated in ``.env.example``), and the
+    middleware already binds exactly that as the acting owner for the request. Only the
+    write routes disagreed, storing notes and trips with no owner at all — so a note saved
+    with no API key was written under one answer to "whose is this" and looked up under
+    another, and never reached a plan.
+
+    Kept as its own test rather than folded into the authenticated one above, because that
+    test passing was the reason the defect stayed hidden: with a key present both answers
+    are the same string, so only the unauthenticated path can see the disagreement.
+    """
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite:///{tmp_path / 'local-mode.db'}",
+        auto_create_schema=True,
+        auth_enabled=False,
+        free_providers_enabled=False,
+        mock_provider_enabled=True,
+        provider_retry_count=0,
+        credential_key_file=str(tmp_path / "credential.key"),
+    )
+    with TestClient(create_app(settings)) as client:
+        # No Authorization header anywhere in this test: that is the whole point.
+        saved = client.post(
+            "/api/v1/ingestions", json={"text": NOTE_TEMPLATE.format(place="人民公园")}
+        )
+        assert saved.status_code == 201, saved.text
+
+        preview = client.post("/api/v1/trips/preview", json=_profile())
+        assert preview.status_code == 200, preview.text
+
+    assert preview.json()["ingested_notes"], (
+        "a note saved in the default local mode must reach the next plan"
+    )
+
+
+def test_the_default_local_mode_still_keeps_a_trip_reachable(tmp_path):
+    """The other half of the same rule: the owner used to write must be the one used to read.
+
+    Trips were consistent with themselves before the fix (both sides unfiltered) and must
+    stay consistent after it, or fixing the notes would have cost the trips.
+    """
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite:///{tmp_path / 'local-trips.db'}",
+        auto_create_schema=True,
+        auth_enabled=False,
+        free_providers_enabled=False,
+        mock_provider_enabled=True,
+        provider_retry_count=0,
+        credential_key_file=str(tmp_path / "credential.key"),
+    )
+    with TestClient(create_app(settings)) as client:
+        created = client.post("/api/v1/trips", json=_profile())
+        assert created.status_code == 200, created.text
+        trip_id = created.json()["id"]
+
+        assert client.get(f"/api/v1/trips/{trip_id}").status_code == 200
+        assert trip_id in {trip["id"] for trip in client.get("/api/v1/trips").json()}
+        # And the export, which reads the same rows and was the first place this class of
+        # defect showed up.
+        assert client.get(f"/api/v1/trips/{trip_id}/export.md").status_code == 200
