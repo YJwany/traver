@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Protocol
 
 from travel_api.domain.models import (
     Attraction,
@@ -40,6 +41,35 @@ logger = logging.getLogger(__name__)
 #: Upper bound on the routable point set. One OSRM table request returns the
 #: full matrix, so this caps both request size and matrix growth (n^2 legs).
 MAX_ROUTE_POINTS = 40
+
+
+class ProgressReporter(Protocol):
+    """Where the planner announces the boundaries it crosses.
+
+    A narrow protocol rather than the job registry itself, so planning does not depend on
+    the job machinery — the synchronous endpoint passes nothing and behaves exactly as
+    before. The two methods are separate because a step is genuinely open for a while: the
+    reporter publishes on *open* so a slow step is visible while it is slow, which is the
+    only moment progress information is worth anything.
+    """
+
+    async def step(self, name: str, detail: str = "") -> None: ...
+
+    async def finish_step(self) -> None: ...
+
+
+class _NullProgress:
+    """The no-op reporter, so every ``report`` call site can be unconditional."""
+
+    async def step(self, name: str, detail: str = "") -> None:
+        del name, detail
+
+    async def finish_step(self) -> None:
+        return None
+
+
+def _progress_of(reporter) -> ProgressReporter:
+    return reporter if reporter is not None else _NullProgress()
 
 
 def _audit_entry(operation: str, result: ProviderResult) -> dict:
@@ -260,7 +290,15 @@ async def build_preview(
     budget_engine: BudgetEngine | None = None,
     freshness_service: FreshnessService | None = None,
     ingestions=None,
+    progress=None,
 ) -> TripPreview:
+    reporter = _progress_of(progress)
+
+    # Each step below is announced at a boundary the code genuinely crosses, and carries
+    # the names of the sources being asked. A progress indicator that advances on a timer
+    # is worse than none: it moves while nothing happens and then jumps, which teaches the
+    # reader to ignore it. These move only when work actually moves.
+    await reporter.step("collect_places", "酒店、餐厅、景点、天气、节假日")
     (
         hotel_results,
         restaurant_results,
@@ -274,15 +312,23 @@ async def build_preview(
         _call_capability(registry, "search_weather", profile),
         _call_capability(registry, "search_holidays", profile),
     )
+    await reporter.finish_step()
 
     hotels = deduplicate_hotels(normalize_hotels(_collect(hotel_results, Hotel)))
     hotel_ids = [str(hotel.id) for hotel in hotels]
+    # Announced even when there is nothing to ask, so the step list is the same shape on
+    # every run and a missing step cannot be misread as a silent failure.
+    await reporter.step(
+        "room_offers",
+        f"{len(hotel_ids)} 家酒店" if hotel_ids else "无候选酒店，跳过",
+    )
     offer_results = (
         await _call_capability(registry, "search_room_offers", hotel_ids, profile)
         if hotel_ids
         else []
     )
     offers = _collect(offer_results, HotelOffer)
+    await reporter.finish_step()
 
     restaurants = deduplicate_restaurants(
         normalize_restaurants(_collect(restaurant_results, Restaurant))
@@ -294,6 +340,10 @@ async def build_preview(
     # Content enrichment runs *after* dedup so the same article is fetched once
     # per surviving attraction, and only for entities that carry an explicit
     # OSM wikipedia/wikidata link (the provider never guesses a match).
+    await reporter.step(
+        "enrich_attractions",
+        f"{len(attractions)} 个景点" if attractions else "无候选景点，跳过",
+    )
     enrichment_results = (
         await _call_capability(registry, "enrich_attractions", attractions, profile)
         if attractions
@@ -306,6 +356,7 @@ async def build_preview(
         known = {attraction.id for attraction in attractions}
         replacements = {item.id: item for item in enriched if item.id in known}
         attractions = [replacements.get(item.id, item) for item in attractions]
+    await reporter.finish_step()
 
     decisions = score_hotel_offers(hotels, offers, profile)
     selected_offer = None
@@ -321,6 +372,13 @@ async def build_preview(
     # Routing happens *after* the candidate set exists: a routing service needs
     # real coordinates, which are only known once POIs have been aggregated.
     route_points = _build_route_points(selected_hotel, attractions, restaurants, profile)
+    # The slowest step for most deployments, and the reason this whole job mechanism
+    # exists — a single upstream query was measured at 36.5 s, so the count is reported
+    # to make a long wait legible rather than mysterious.
+    await reporter.step(
+        "calculate_routes",
+        f"{len(route_points)} 个途经点" if len(route_points) >= 2 else "途经点不足，跳过",
+    )
     route_results = (
         await _call_capability(registry, "calculate_routes", profile, route_points)
         if len(route_points) >= 2
@@ -329,7 +387,9 @@ async def build_preview(
     routes = [
         item for result in route_results for item in result.data if hasattr(item, "origin_id")
     ]
+    await reporter.finish_step()
 
+    await reporter.step("build_itinerary", "预算与每日路线")
     budget = (budget_engine or BudgetEngine()).calculate(
         profile,
         selected_offer,
@@ -353,8 +413,11 @@ async def build_preview(
     )
     weather = next(iter(_collect(weather_results, WeatherForecast)), None)
     holidays = next(iter(_collect(holiday_results, HolidayCalendar)), None)
+    await reporter.finish_step()
 
+    await reporter.step("collect_health", "各数据源状态")
     health: list[ProviderHealth] = await registry.health()
+    await reporter.finish_step()
     refs = [
         ref
         for result in [
@@ -423,7 +486,7 @@ async def build_preview(
         + [_audit_entry("search_holidays", result) for result in holiday_results]
         + [_audit_entry("enrich_attractions", result) for result in enrichment_results]
     )
-    return TripPreview(
+    preview = TripPreview(
         profile=profile,
         hotels=hotels,
         hotel_offers=offers,
@@ -442,3 +505,8 @@ async def build_preview(
         ingested_notes=ingested_notes,
         generated_at=datetime.now(timezone.utc),
     )
+    # Closed after the result exists, so a step never reports finished while its own
+    # output is still being assembled — a step list that disagrees with reality is the
+    # failure this whole mechanism is meant to avoid.
+    await reporter.finish_step()
+    return preview

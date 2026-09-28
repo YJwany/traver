@@ -43,6 +43,7 @@ from travel_api.services.credentials import (
 from travel_api.services.freshness import FreshnessPolicy, FreshnessService
 from travel_api.services.model_runtime import ModelRuntime
 from travel_api.services.owner_context import reset_current_owner, set_current_owner
+from travel_api.services.planning_jobs import PlanningJobRegistry
 from travel_api.services.tool_registry import build_default_tool_registry
 from travel_api.services.travel_ai import TravelAIService
 from travel_api.services.trip_service import TripService
@@ -183,6 +184,12 @@ def create_app(
         # saved notes: a note the traveller supplied is one of the plan's sources.
         ingestion_service = ContentIngestionService(lambda: UnitOfWork(database.session_factory))
         app.state.ingestion_service = ingestion_service
+        # Long-running planning. In-process, which is a real limitation and is why the
+        # docs say so: a multi-worker deployment would need a shared store before a job
+        # created on one worker could be polled on another. For a single-process
+        # deployment this has no external dependency that can fail.
+        planning_jobs = PlanningJobRegistry()
+        app.state.planning_jobs = planning_jobs
         app.state.trip_service = TripService(
             provider_registry=registry,
             uow_factory=lambda: UnitOfWork(database.session_factory),
@@ -198,6 +205,7 @@ def create_app(
                 )
             ),
             content_service=ingestion_service,
+            jobs=planning_jobs,
         )
         app.state.tool_registry = build_default_tool_registry(app.state.trip_service)
 

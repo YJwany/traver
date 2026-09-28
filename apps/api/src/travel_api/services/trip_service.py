@@ -26,6 +26,24 @@ from travel_api.services.route_optimizer import RouteOptimizer
 logger = logging.getLogger(__name__)
 
 
+async def _maybe_step(reporter, name: str, detail: str = "") -> None:
+    """Announce a step if anyone is listening.
+
+    Module-level rather than a method so both the trip service and its job runner can call
+    it without either depending on the other's type, and so the synchronous path pays
+    nothing but an ``is None`` check.
+    """
+    if reporter is None:
+        return
+    await reporter.step(name, detail)
+
+
+async def _maybe_finish_step(reporter) -> None:
+    if reporter is None:
+        return
+    await reporter.finish_step()
+
+
 class TripNotFoundError(LookupError):
     pass
 
@@ -55,6 +73,7 @@ class TripService:
         freshness_service: FreshnessService | None = None,
         budget_engine: BudgetEngine | None = None,
         content_service=None,
+        jobs=None,
     ) -> None:
         self.provider_registry = provider_registry
         self.uow_factory = uow_factory
@@ -63,6 +82,9 @@ class TripService:
         # Optional, so a deployment that never wires ingestion still plans exactly as
         # before; the notes are an enhancement, not a dependency.
         self.content_service = content_service
+        # Also optional: a deployment that only ever calls the synchronous endpoint needs
+        # no job registry at all, and ``queue`` says so explicitly instead of pretending.
+        self.jobs = jobs
 
     def _ingestions(self, owner_id: str | None):
         """The caller's stored notes, or nothing when ingestion is not configured.
@@ -86,6 +108,7 @@ class TripService:
         budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
         *,
         owner_id: str | None = None,
+        progress=None,
     ):
         # Scoped per call, not per process: which sources exist depends on whose
         # credentials are in play, so two owners can get different data from one
@@ -105,6 +128,7 @@ class TripService:
             # by whatever a provider stamped on its own data.
             self.freshness,
             ingestions=self._ingestions(resolved),
+            progress=progress,
         )
 
     async def create(
@@ -113,8 +137,10 @@ class TripService:
         budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
         *,
         owner_id: str | None = None,
+        progress=None,
     ) -> Trip:
-        preview = await self.preview(profile, budget_strategy, owner_id=owner_id)
+        preview = await self.preview(profile, budget_strategy, owner_id=owner_id, progress=progress)
+        await _maybe_step(progress, "save_trip", "写入行程与实体")
         trip = Trip(
             profile=profile,
             preview=preview,
@@ -126,7 +152,52 @@ class TripService:
         )
         with self.uow_factory() as uow:
             self._persist_graph(uow, trip, owner_id=owner_id)
+        await _maybe_finish_step(progress)
         return trip
+
+    def queue(
+        self,
+        profile,
+        budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
+        *,
+        owner_id: str | None = None,
+        jobs=None,
+    ):
+        """Queue planning and return the job immediately.
+
+        A synchronous plan blocks the browser for the length of the slowest upstream call,
+        which in practice is tens of seconds — long enough that the user cannot tell
+        working from hung. Handing back a job id turns that wait into something visible.
+
+        Raises ``RuntimeError`` when no registry was wired, rather than silently falling
+        back to a blocking plan: a caller that asked for a job must not receive a request
+        that hangs instead.
+        """
+        registry = jobs if jobs is not None else self.jobs
+        if registry is None:
+            raise RuntimeError("planning job registry is not configured")
+
+        async def runner(job):
+            # The owner is the one captured at submit time, never a later ambient value:
+            # a background task outlives the request that started it, so reading the
+            # context here would plan as whoever happened to be asking when it resumed.
+            progress = registry.progress(job)
+            await _maybe_step(progress, "resolve_sources", "按属主装配可用数据源")
+            await _maybe_finish_step(progress)
+            trip = await self.create(
+                job.profile,
+                job.budget_strategy,
+                owner_id=owner_id,
+                progress=progress,
+            )
+            return trip.id
+
+        return registry.submit(
+            profile,
+            runner,
+            owner_id=owner_id,
+            budget_strategy=str(budget_strategy),
+        )
 
     def get(self, trip_id: UUID, *, owner_id: str | None = None) -> Trip:
         with self.uow_factory() as uow:

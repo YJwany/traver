@@ -33,6 +33,7 @@ from travel_api.services.credentials import (
     VaultLockedError,
     configured_credentials,
 )
+from travel_api.services.planning_jobs import job_as_dict
 from travel_api.services.trip_service import (
     ConcurrentTripUpdateError,
     TripNotFoundError,
@@ -351,6 +352,158 @@ async def call_tool(
 @router.post("/trips/preview", response_model=TripPreview, dependencies=[Depends(require_write)])
 async def trip_preview(profile: TripProfile, request: Request) -> TripPreview:
     return await trip_service(request).preview(profile)
+
+
+# -- long-running planning -----------------------------------------------------
+#
+# Under ``/planning`` rather than ``/trips/jobs``: the latter would sit inside the
+# ``/trips/{trip_id}`` space, where correct resolution depends on registration order — a
+# route that breaks when someone reorders a file. A separate prefix removes the hazard
+# rather than documenting it.
+
+
+def planning_jobs(request: Request):
+    """The job registry, or 503 when this deployment ran planning synchronously.
+
+    A 503 rather than a fallback to a blocking plan: a client that asked for a job must
+    not receive a request that hangs for 36 seconds instead.
+    """
+    registry = getattr(request.app.state, "planning_jobs", None)
+    if registry is None:
+        raise HTTPException(status_code=503, detail="planning jobs are not enabled")
+    return registry
+
+
+@router.post("/planning/jobs", status_code=202, dependencies=[Depends(require_write)])
+async def submit_planning_job(
+    payload: TripProfile,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    strategy: str = Query(default="balanced"),
+    queue_trip: bool = Query(
+        default=True,
+        description="true 创建并保存行程；false 只生成预览供查看",
+    ),
+) -> dict:
+    """Queue planning and return immediately.
+
+    202 with the job body, not 201: nothing has been created yet at this point, and saying
+    "created" would promise a trip that may yet fail.
+    """
+    trip_service_instance = trip_service(request)
+    owner = _resolved_owner(request, principal)
+    registry = planning_jobs(request)
+    if not queue_trip:
+        # A preview-only job: useful for trying a destination before committing to it,
+        # which is exactly what the synchronous endpoint is slow at.
+        async def runner(job):
+            progress = registry.progress(job)
+            await progress.step("resolve_sources", "按属主装配可用数据源")
+            await progress.finish_step()
+            # Built and discarded: the point of this mode is to see the plan without
+            # committing to it, so nothing is persisted and the job reports no trip id.
+            await trip_service_instance.preview(
+                job.profile, job.budget_strategy, owner_id=owner, progress=progress
+            )
+            return None
+
+        job = registry.submit(payload, runner, owner_id=owner, budget_strategy=strategy)
+    else:
+        job = trip_service_instance.queue(payload, strategy, owner_id=owner, jobs=registry)
+    return job_as_dict(job)
+
+
+@router.get("/planning/jobs", dependencies=[Depends(require_read)])
+async def list_planning_jobs(
+    request: Request, principal: Principal = Depends(get_principal)
+) -> list[dict]:
+    registry = planning_jobs(request)
+    return [
+        job_as_dict(job) for job in registry.list_for_owner(_resolved_owner(request, principal))
+    ]
+
+
+@router.get("/planning/jobs/{job_id}", dependencies=[Depends(require_read)])
+async def get_planning_job(
+    job_id: str, request: Request, principal: Principal = Depends(get_principal)
+) -> dict:
+    job = planning_jobs(request).get(job_id, owner_id=_resolved_owner(request, principal))
+    if job is None:
+        # 404 rather than 403 for another owner's job, same as trips and notes.
+        raise HTTPException(status_code=404, detail="job not found")
+    return job_as_dict(job)
+
+
+@router.post("/planning/jobs/{job_id}/cancel", dependencies=[Depends(require_write)])
+async def cancel_planning_job(
+    job_id: str, request: Request, principal: Principal = Depends(get_principal)
+) -> dict:
+    """Ask a job to stop. Idempotent: cancelling a finished job is not an error."""
+    job = planning_jobs(request).cancel(job_id, owner_id=_resolved_owner(request, principal))
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job_as_dict(job)
+
+
+@router.get("/planning/jobs/{job_id}/events", dependencies=[Depends(require_read)])
+async def stream_planning_job(
+    job_id: str, request: Request, principal: Principal = Depends(get_principal)
+):
+    """Server-sent progress for a job.
+
+    SSE rather than a WebSocket because the traffic is one-directional, survives proxies
+    as plain HTTP, and reconnects on its own — all of which a traveller on hotel wifi
+    benefits from. Each event carries the *whole* job rather than a delta, so a client that
+    connects late, or reconnects, cannot end up with a progress display that disagrees with
+    the server.
+
+    The stream ends when the job reaches a terminal state, rather than staying open to be
+    polled forever: a stream that never closes is a resource leak that only shows up in
+    production.
+    """
+    import asyncio
+    import json
+
+    from fastapi.responses import StreamingResponse
+
+    registry = planning_jobs(request)
+    owner = _resolved_owner(request, principal)
+    job = registry.get(job_id, owner_id=owner)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    async def events():
+        queue = registry.subscribe(job_id)
+        try:
+            # The current state first, so a late subscriber sees where things already are.
+            current = registry.get(job_id, owner_id=owner)
+            if current is None:
+                return
+            yield f"data: {json.dumps(job_as_dict(current), ensure_ascii=False)}\n\n"
+            if current.status.is_terminal:
+                return
+            while True:
+                try:
+                    snapshot = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    # A comment frame keeps intermediaries from closing an idle
+                    # connection, and tells the client the server is still there.
+                    yield ": keep-alive\n\n"
+                    still = registry.get(job_id, owner_id=owner)
+                    if still is None or still.status.is_terminal:
+                        return
+                    continue
+                yield f"data: {json.dumps(job_as_dict(snapshot), ensure_ascii=False)}\n\n"
+                if snapshot.status.is_terminal:
+                    return
+        finally:
+            registry.unsubscribe(job_id, queue)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/trips", response_model=Trip, dependencies=[Depends(require_write)])

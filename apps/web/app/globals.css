@@ -231,3 +231,27 @@ button { cursor: pointer; }
 /* The verbatim source, scrollable: a pasted page can be tens of thousands of
    characters and must not push the rest of the screen off the fold. */
 .ingestion-source { max-height: 240px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--line); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+/* -- planning progress -----------------------------------------------------
+   The step list is a record of what happened, not an animation, so no element
+   here is transitioned or timed. A step that is slow must look slow. */
+.example-active { color: var(--blue); border-color: var(--blue); background: var(--blue-soft); font-weight: 600; }
+.step-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 2px; }
+.step-item { display: grid; grid-template-columns: 18px 1fr auto auto; gap: 10px; align-items: baseline; padding: 8px 10px; border-left: 2px solid var(--line); font-size: 12.5px; }
+/* The active step is marked, but with a colour and a glyph rather than a spinner:
+   a spinner implies liveness the browser cannot actually know about. */
+.step-active { border-left-color: var(--blue); background: var(--blue-soft); }
+.step-done { border-left-color: var(--green); color: var(--muted); }
+.step-mark { color: var(--muted); font-size: 11px; }
+.step-active .step-mark { color: var(--blue); }
+.step-done .step-mark { color: var(--green); }
+.step-name { font-weight: 600; }
+.step-active .step-name { color: var(--blue); }
+.step-detail { color: var(--muted); font-size: 11.5px; }
+.step-time { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.status-queued { color: var(--muted); background: #eef0f3; }
+.status-running { color: var(--blue); background: var(--blue-soft); }
+.status-succeeded { color: var(--green); background: var(--green-soft); }
+.status-failed { color: var(--red); background: var(--red-soft); }
+.status-cancelled { color: var(--amber); background: var(--amber-soft); }
+@media (max-width: 620px) { .step-item { grid-template-columns: 18px 1fr; } .step-detail, .step-time { grid-column: 2; } }
