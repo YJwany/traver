@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from travel_api.domain.models import (
     Attraction,
     DataDomain,
+    ObservationBasis,
     ProviderHealth,
     ProviderResult,
     SourceReference,
@@ -176,6 +177,7 @@ class WikipediaContentProvider:
                 source_type=SourceType.OPEN_DATA,
                 source_id=f"wikipedia:zh:{title}",
                 observed_at=now,
+                observed_at_basis=ObservationBasis.SOURCE_SILENT,
                 fetched_at=now,
                 expires_at=now + timedelta(seconds=self.ttl_seconds),
                 request_context={

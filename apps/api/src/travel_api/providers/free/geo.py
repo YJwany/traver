@@ -17,7 +17,13 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from travel_api.domain.models import Coordinates, DataDomain, SourceReference, SourceType
+from travel_api.domain.models import (
+    Coordinates,
+    DataDomain,
+    ObservationBasis,
+    SourceReference,
+    SourceType,
+)
 from travel_api.providers.free.attribution import (
     OPEN_METEO_ATTRIBUTION as _OPEN_METEO,
 )
@@ -433,6 +439,7 @@ class GeoResolver:
             source_type=SourceType.OPEN_DATA,
             source_id=source_id,
             observed_at=now,
+            observed_at_basis=ObservationBasis.SOURCE_SILENT,
             fetched_at=now,
             # Administrative boundaries change on the order of months.
             expires_at=now + timedelta(days=30),

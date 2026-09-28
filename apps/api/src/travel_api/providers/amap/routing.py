@@ -53,6 +53,7 @@ from decimal import Decimal
 from travel_api.domain.models import (
     DataDomain,
     Money,
+    ObservationBasis,
     Pace,
     PriceType,
     ProviderHealth,
@@ -575,6 +576,10 @@ class AmapRoutingProvider:
             observed_at=now,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
+            # The route is computed on demand from the current road network, so "now"
+            # is a true statement about it. It says nothing about whether a closure or
+            # a new line was incorporated — no route source can promise that.
+            observed_at_basis=ObservationBasis.LIVE_COMPUTED,
             request_context={
                 "amap_endpoint": (
                     "/v5/direction/transit/integrated"

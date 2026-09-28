@@ -5,6 +5,7 @@ import { FormEvent, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { useTripStore } from "../../../lib/trip-store";
 import type { Attribution } from "../../../lib/trip-store";
+import { freshnessClass, freshnessLabel, formatTimestamp } from "../../../lib/freshness";
 
 type AnyRecord = Record<string, any>;
 type Trip = AnyRecord;
@@ -13,10 +14,33 @@ const typeNames: Record<string, string> = { attraction: "景点", restaurant: "�
 
 function formatMoney(value: unknown) { return value === null || value === undefined ? "—" : `¥${value}`; }
 function formatTime(value: string) { return value?.slice(11, 16) ?? ""; }
-function timeAgo(value?: string) { if (!value) return "未知"; const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000)); return minutes < 1 ? "刚刚" : `${minutes} 分钟前`; }
 function sourceFor(item: AnyRecord) { return item.source_reference ?? item.source_references?.[0] ?? item.source_reference; }
-function statusClass(source: AnyRecord | undefined, estimated = false) { return estimated ? "status-chip status-estimated" : source?.is_stale ? "status-chip status-stale" : "status-chip status-fresh"; }
-function statusText(source: AnyRecord | undefined, estimated = false) { return estimated ? "估算" : source?.is_stale ? "已过期" : "实时"; }
+
+// The labelling rules live in lib/freshness.ts so they can be tested directly: they are
+// the part of this screen that can mislead, and they were previously wrong in a way no
+// test could see.
+
+function StaleFactBanner({ facts }: { facts: AnyRecord[] }) {
+  if (!facts.length) return null;
+  return <div className="panel" style={{ marginTop: 18, borderColor: "var(--amber)" }}>
+    <div className="panel-heading">
+      <h2>时效性提示 / stale data</h2>
+      <span className="status-chip status-stale">{facts.length} 项</span>
+    </div>
+    <div className="panel-body">
+      {facts.map((fact: AnyRecord, index: number) => <div key={`${fact.source}:${fact.source_id}:${index}`} className="entity-card">
+        <div className="entity-title"><span>{fact.source}</span><span className="status-chip status-stale">{fact.data_type}</span></div>
+        <div className="entity-meta">{fact.detail}</div>
+        <div className="entity-meta">
+          抓取时间 {formatTimestamp(fact.fetched_at)} · 判定时间 {formatTimestamp(fact.evaluated_at)}
+        </div>
+      </div>)}
+      <div className="entity-meta" style={{ marginTop: 10 }}>
+        这些数据自身的时间已超出该类事实可接受的范围，因此不应作为「当前信息」使用。抓取时间只说明我们何时去问，不代表数据本身很新。
+      </div>
+    </div>
+  </div>;
+}
 
 function MapPanel({ trip }: { trip: Trip }) {
   const entities = [
@@ -90,7 +114,7 @@ function AttributionFooter({ attributions }: { attributions: Attribution[] }) {
 
 function SourceChip({ source, estimated = false }: { source?: AnyRecord; estimated?: boolean }) {
   if (!source && !estimated) return null;
-  return <><span className="source-chip">{estimated ? "系统计算" : source?.source ?? "来源未知"}</span><span className={statusClass(source, estimated)}>{statusText(source, estimated)} · {estimated ? "模型/规则" : timeAgo(source?.observed_at)}</span></>;
+  return <><span className="source-chip">{estimated ? "系统计算" : source?.source ?? "来源未知"}</span><span className={freshnessClass(source, estimated)}>{freshnessLabel(source, estimated)}</span></>;
 }
 
 export default function TripWorkspacePage({ params }: { params: { id: string } }) {
@@ -115,10 +139,11 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
     {error && <div className="error" style={{ marginTop: 18 }}>{error}</div>}
     {lastResult?.change && <section className="diff"><h3>已保存 Version {lastResult.version} · 本次修改</h3><p>动作：{lastResult.change.action}</p><p>预算影响：{lastResult.change.impact?.difference ? `${lastResult.change.impact.difference}（程序计算）` : "已重新计算"}</p><p>所有变化均来自结构化 Revision 与 Change History。</p></section>}
     {lastResult && lastResult.warnings?.length > 0 && <div className="notice" style={{ margin: "18px 0" }}>{lastResult.warnings.join("；")}</div>}
+    <StaleFactBanner facts={trip.preview?.stale_facts ?? []} />
     <section className="workspace-grid"><div className="panel"><div className="panel-heading"><h2>行程 / itinerary</h2><span className="muted">{trip.itinerary?.conflicts?.length ?? 0} 个冲突</span></div><div className="panel-body">{trip.itinerary?.days?.map((day: AnyRecord) => <div className="day" key={day.id}><h3>Day {day.day_index} <span className="muted">· {day.day_date}</span></h3>{day.items.length === 0 && <div className="muted">暂无可行项目</div>}{day.items.map((item: AnyRecord) => <div className="itinerary-item" key={item.id}><div className="item-time">{formatTime(item.start_time)}</div><div><div className="item-title">{item.title}</div><div className="item-type">{typeNames[item.item_type] ?? item.item_type} · {item.visit_duration_minutes} 分钟 · 路程 {item.travel_from_previous_minutes} 分钟</div></div></div>)}</div>)}</div></div><div className="panel"><div className="panel-heading"><h2>地图 / route view</h2><span className="muted">路线由 Route Optimizer 计算</span></div><MapPanel trip={trip} /></div></section>
     <section className="lower-grid"><div className="panel"><div className="panel-heading"><h2>酒店 / offers</h2><span className="muted">{trip.preview?.hotels?.length ?? 0} 家 · {trip.preview?.hotel_offers?.length ?? 0} 个报价</span></div><div className="panel-body">{trip.preview?.hotel_offers?.length ? trip.preview.hotel_offers.slice(0, 6).map((offer: AnyRecord) => { const hotel = trip.preview.hotels.find((item: AnyRecord) => item.id === offer.hotel_id); const source = sourceFor(offer); return <div className="entity-card" key={offer.id}><div className="entity-title"><span>{hotel?.canonical_name ?? "Hotel offer"}{offer.id === trip.selected_hotel_offer_id && <span className="source-chip">已选择</span>}</span><span className="money">{formatMoney(offer.total_price)}</span></div><div className="entity-meta">{hotel?.rating ? `评分 ${hotel.rating} · ` : ""}{hotel?.location?.district ?? ""}<br />房型与取消政策保留在 Offer 层</div><SourceChip source={source} /></div>; }) : <div className="empty">免费数据源提供酒店地理与名称事实，但不含房价与库存，因此没有报价。预算中的酒店金额是可配置的估算额度，标记为估算。</div>}</div></div>
       <div className="panel"><div className="panel-heading"><h2>美食 / restaurants</h2><span className="muted">{trip.preview?.restaurants?.length ?? 0} 家</span></div><div className="panel-body">{trip.preview?.restaurants?.slice(0, 8).map((item: AnyRecord) => { const source = sourceFor(item); return <div className="entity-card" key={item.id}><div className="entity-title"><span>{item.canonical_name}</span><span className="money">{formatMoney(item.average_cost?.value)}</span></div><div className="entity-meta">{item.cuisine?.join(" / ") || "餐厅"}{item.rating ? ` · 评分 ${item.rating}` : ""}<br />{item.location?.address}</div><SourceChip source={source} /></div>; })}</div></div>
-      <div className="panel"><div className="panel-heading"><h2>预算 / sources</h2><span className={budget?.over_budget ? "status-chip status-stale" : "status-chip status-fresh"}>{budget?.over_budget ? "超预算" : "预算内"}</span></div><div className="panel-body">{budget?.items?.map((item: AnyRecord) => <div className="budget-row" key={item.category}><div>{item.category}<small>{item.status}{item.is_estimate ? " · 估算" : " · 有来源"}</small></div><span className="money">{formatMoney(item.amount)}</span></div>)}<div style={{ marginTop: 18 }} className="entity-meta">来源更新时间（{sources.length} 条引用）</div>{sources.slice(0, 6).map((source: AnyRecord) => <div key={`${source.source}:${source.source_id}`}><SourceChip source={source} /></div>)}</div></div>
+      <div className="panel"><div className="panel-heading"><h2>预算 / sources</h2><span className={budget?.over_budget ? "status-chip status-stale" : "status-chip status-fresh"}>{budget?.over_budget ? "超预算" : "预算内"}</span></div><div className="panel-body">{budget?.items?.map((item: AnyRecord) => <div className="budget-row" key={item.category}><div>{item.category}<small>{item.status}{item.is_estimate ? " · 估算" : " · 有来源"}</small></div><span className="money">{formatMoney(item.amount)}</span></div>)}<div style={{ marginTop: 18 }} className="entity-meta">来源与时间（{sources.length} 条引用）· 抓取时间与数据自身时间分别标注，不把「刚抓到」当作「数据很新」</div>{sources.slice(0, 6).map((source: AnyRecord) => <div key={`${source.source}:${source.source_id}`}><SourceChip source={source} /></div>)}</div></div>
     </section>
     <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><h2>天气 / forecast</h2><span className="muted">{weather?.days?.length ?? 0} 天</span></div><WeatherPanel weather={weather} /></section>
     <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><h2>节假日 / public holidays</h2><span className="muted">{trip.preview?.holidays?.holidays?.length ?? 0} 天</span></div><HolidayPanel holidays={trip.preview?.holidays ?? null} /></section>

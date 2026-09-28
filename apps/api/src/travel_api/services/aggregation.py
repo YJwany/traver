@@ -27,6 +27,7 @@ from travel_api.services.entity_resolution import (
     deduplicate_hotels,
     deduplicate_restaurants,
 )
+from travel_api.services.freshness import FreshnessService
 from travel_api.services.normalization import (
     normalize_attractions,
     normalize_hotels,
@@ -156,6 +157,7 @@ async def build_preview(
     registry: ProviderRegistry,
     budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
     budget_engine: BudgetEngine | None = None,
+    freshness_service: FreshnessService | None = None,
 ) -> TripPreview:
     (
         hotel_results,
@@ -265,6 +267,32 @@ async def build_preview(
         ]
         for ref in result.source_references
     ]
+    # Each reference is paired with the kind of fact it carries, because whether an age
+    # is acceptable is a property of the fact: an hour-old forecast is stale, an
+    # hour-old restaurant listing is not. A reference on its own cannot say which it is.
+    typed_refs: list[tuple[str, object]] = [
+        ("hotel", ref) for result in hotel_results for ref in result.source_references
+    ]
+    typed_refs += [
+        ("hotel_offer", ref) for result in offer_results for ref in result.source_references
+    ]
+    typed_refs += [
+        ("restaurant", ref)
+        for result in [*restaurant_results, *enrichment_results]
+        for ref in result.source_references
+    ]
+    typed_refs += [
+        ("attraction", ref) for result in attraction_results for ref in result.source_references
+    ]
+    typed_refs += [("route", ref) for result in route_results for ref in result.source_references]
+    typed_refs += [
+        ("weather", ref) for result in weather_results for ref in result.source_references
+    ]
+    # Recomputed here rather than trusted from the provider, so the verdict is applied
+    # by the current policy in one place instead of by whichever provider happened to
+    # stamp the data.
+    freshness = freshness_service or FreshnessService()
+    stale_facts = freshness.stale_facts(typed_refs)
     provider_audit = (
         [_audit_entry("search_hotels", result) for result in hotel_results]
         + [_audit_entry("search_room_offers", result) for result in offer_results]
@@ -290,5 +318,6 @@ async def build_preview(
         provider_health=health,
         provider_audit=provider_audit,
         source_references=refs,
+        stale_facts=stale_facts,
         generated_at=datetime.now(timezone.utc),
     )

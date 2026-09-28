@@ -36,6 +36,7 @@ from typing import Any
 from travel_api.domain.models import (
     DataDomain,
     HolidayCalendar,
+    ObservationBasis,
     ProviderHealth,
     ProviderResult,
     PublicHoliday,
@@ -145,6 +146,7 @@ class HolidaysLibraryProvider:
             source_type=SourceType.OPEN_DATA,
             source_id=f"holidays:{country_code}:{years[0]}-{years[-1]}",
             observed_at=now,
+            observed_at_basis=ObservationBasis.SOURCE_SILENT,
             fetched_at=now,
             # Holiday calendars are announced well in advance and change rarely.
             expires_at=now + timedelta(seconds=self.ttl_seconds),

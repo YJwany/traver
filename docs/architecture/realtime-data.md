@@ -1,21 +1,79 @@
-# Realtime Data
+# 时效性（Realtime Data）
 
-Phase 2 已实现 `hotel_offer_snapshots` 和 `route_snapshots`。Offer 刷新追加历史，不覆盖旧值；`GET /api/v1/trips/{id}/snapshots` 返回 `current`、`history` 和相邻观察的 `diff`。快照通过 SourceReference 绑定 Provider、source id 和观察时间。
+旅游攻略是**为未来做的**，所以数据的新旧不是细节而是前提。用三年前的评分、昨天的预报或半小时前的路况去安排行程，得到的是一份看起来像知识、实际已经失效的计划。本文记录 Traver 如何把这条要求变成代码里的约束，而不是文档里的承诺。
 
-## Freshness 分级
+## 三个时间，不能混为一谈
 
-| 数据 | 策略 |
+同一个 `SourceReference` 上有三个时间，含义各不相同：
+
+| 字段 | 含义 | 是否总是可靠 |
+| --- | --- | --- |
+| `fetched_at` | **我们何时去问**。永远是真实值 | 是 |
+| `observed_at` | **这份数据自身是何时产生/测得的** | 取决于 `observed_at_basis` |
+| `expires_at` | **我们这份副本的有效期**，过了就该重新拉 | 是（我们设定） |
+
+`is_stale` 只回答第三个问题：「我们手里的副本过期了吗」。它**不**回答数据本身有多新——刚抓到的一份两年前的数据集，`is_stale` 是 `false`。
+
+## `observed_at_basis`：这份时间到底在说什么
+
+只有来源**自己声明**了生成时间，`observed_at` 才是在描述数据。因此每条引用都必须标注它属于哪一种：
+
+| basis | 含义 | 例子 |
+| --- | --- | --- |
+| `provider_reported` | 来源给出了数据自身的产生时间，`observed_at` 就是它 | 高德天气的 `reporttime`、OSM 的 `osm_base` |
+| `live_computed` | 数据由本次请求即时算出，所以「就是现在」为真 | OSRM / 高德按当前路网算出的路线 |
+| `source_silent` | 来源返回了数据，但**没有说**它有多新 | 高德 POI、Nominatim、Open-Meteo |
+| `unknown` | 未分类。默认值，且**绝不会**被当作 `provider_reported` | — |
+
+`ObservationBasis.age_is_about_the_data` 只在 `provider_reported` 时为真。需要判断「数据是否够新」的调用方必须用它，这样未分类或沉默的来源就不可能被算成新鲜。
+
+### 为什么必须有这个字段
+
+因为它曾经被弄错过，而且错在危险的方向。高德天气接口**明确返回** `reporttime`（发布时间），但代码把 `observed_at` 写成了「我们请求的时刻」，只把 `reporttime` 塞进 `request_context`。结果是：一条六小时前发布的预报，结构化字段上读起来像「刚刚观测到」。真相就在手上，却被一个更方便的默认值盖掉了——这正是「不要吹嘘」要禁止的事。
+
+还有一个更细的坑：高德的 `reporttime` 是**北京时间（UTC+8）且不带时区**。若按 UTC 解读，会把发布时间放到八小时后的未来，`data_age_seconds` 于是被夹到 0，**旧预报反而显得最新**。这是唯一会「隐藏过期」的错误方向，所以有专门的测试钉住它（`test_reporttime_is_read_as_beijing_time_not_utc`）。
+
+## 数据的年龄上限（`MAX_AGE_SECONDS`）
+
+TTL 与年龄上限是两个不同的问题：
+
+- **TTL** 回答「什么时候该再去问一次」；
+- **年龄上限**回答「这个事实什么时候开始不再成立」。
+
+后者按事实类型区分，因为不同事实的失效速度差了三个数量级：
+
+| 类型 | 年龄上限 |
 | --- | --- |
-| 房态、Offer 价格、票库存 | 短 TTL，默认刷新 |
-| 餐厅评分、营业时间、POI | 中 TTL |
-| 城市介绍、攻略描述 | 长 TTL |
+| 天气 | 1 小时（被取代的预报会自信地描述昨天的雨） |
+| 路线 | 1 小时（施工与线路调整） |
+| 房态 | 30 分钟 |
+| 报价 | 12 小时 |
+| 餐厅 / 酒店 / 景点 | 24 小时 |
 
-每一条事实由 \`observed_at\`、\`fetched_at\`、\`expires_at\` 控制；前端必须在过期时显示“数据已过期，请刷新”，而不是继续装作实时。
+超过上限的 `provider_reported` 数据会进入 `TripPreview.stale_facts`，**明确指出**数据自身时间、已超出多少、以及它是何时被判定的。前端有独立的「时效性提示」面板显示这些条目，而不是把它们埋起来。
 
-## 快照
+三种结果被刻意分开，因为补救方式不同：
 
-下一阶段将增加 \`hotel_offer_snapshots\`、\`restaurant_price_snapshots\`、\`weather_snapshots\`、\`route_snapshots\`，记录价格/库存/路线的变化，用于刷新后的差异解释和回滚。
+- `too_old`：来源给了时间戳且已超限 → 重新拉取，或只作为历史呈现；
+- `age_unknown`：来源沉默 → **不等于过期**。把它报成过期就是在没有依据的情况下断言，方向相反但同样是缺陷；
+- 没有上限的类型（如维基条目）→ 不产生任何结论，既不报「正常」也不报「过期」。
 
-## 故障降级
+`stale_facts` 只包含 `too_old`。一个总是报警的检查和一个从不报警的检查一样没用，所以「近期数据不报警」也有测试覆盖。
 
-Provider 单独隔离。一个数据源超时不会让整次聚合返回 500；结果保留可用 Provider、失败状态和 request id，前端显示“本次结果基于哪些来源，哪些来源暂不可用”。
+### 判定是快照，因此必须自我说明
+
+`stale_facts` 会随行程一起入库，可能几天后才被读到。因此每条结论都带 `evaluated_at`（何时判定的）与绝对的 `observed_at`，且说明文字锚定**绝对时间**而不是「N 小时前」——后者在库里放一天就会变成假话。`SourceReference.data_age_seconds` 是计算字段，重新读取时会按当下重新算，所以活的年龄始终可得；结论里的数字则是历史记录，两者由 `evaluated_at` 区分。
+
+## 缓存与「伪实时」
+
+缓存本身不违反时效性，**把缓存当成实时**才违反。因此：
+
+- 缓存命中时保留**原始**的 `fetched_at` 与 `observed_at`，不刷新成当前时间（Overpass 的 POI 缓存即如此）；
+- **高德完全不做缓存**：其服务条款第 3.5 条禁止存储或缓存结果，而这与时效性要求方向一致——每次规划都是实时请求，每条数据带真实抓取时间（见 [amap-contract.md](amap-contract.md)）；
+- 界面上的措辞同样受限。此前非过期的来源一律显示「实时」，而对一个不提供时间戳的来源，`is_stale` 恒为 `false`，于是「实时」是在声明我们并不知道的事。现在 `provider_reported` 显示「数据 X 分钟前」、`live_computed` 显示「实时计算」、沉默来源显示「抓取于 X · 数据时间未知」——**抓取时间与数据时间分别标注**（`apps/web/lib/freshness.ts`，有 15 条测试）。
+
+## 快照与降级
+
+Offer 刷新追加历史而不覆盖旧值；`GET /api/v1/trips/{id}/snapshots` 返回 `current`、`history` 与相邻观察的 `diff`。快照通过 `SourceReference` 绑定来源、source id 与观察时间。
+
+Provider 相互隔离：一个数据源超时不会让整次聚合返回 500，结果保留可用来源、失败状态与 request id，前端说明「本次结果基于哪些来源，哪些暂不可用」。

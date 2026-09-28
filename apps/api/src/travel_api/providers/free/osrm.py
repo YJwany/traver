@@ -29,6 +29,7 @@ from decimal import Decimal
 from travel_api.domain.models import (
     DataDomain,
     Money,
+    ObservationBasis,
     Pace,
     PriceType,
     ProviderHealth,
@@ -215,6 +216,7 @@ class OsmRoutingProvider:
             source_type=SourceType.OPEN_DATA,
             source_id=f"osrm:{OSRM_SUPPORTED_PROFILE}:{point_count}",
             observed_at=now,
+            observed_at_basis=ObservationBasis.LIVE_COMPUTED,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             request_context={

@@ -71,6 +71,46 @@ class ItineraryItemType(StrEnum):
     BUFFER = "buffer"
 
 
+class ObservationBasis(StrEnum):
+    """What ``SourceReference.observed_at`` actually measures.
+
+    Several very different situations produce the same timestamp, and a reader cannot
+    tell them apart from the value alone. Recording which one applies is what stops a
+    weaker case from being presented as a stronger one — the whole point of tracking
+    freshness separately from the fetch.
+
+    The distinction that matters most for a trip planned in the future: only
+    ``PROVIDER_REPORTED`` tells you how old the *data* is. The others tell you only
+    that we asked recently.
+    """
+
+    #: The source stated when the datum was produced or measured — 高德's
+    #: ``reporttime``, OpenStreetMap's ``osm_base`` snapshot time. ``observed_at`` is
+    #: that time, so ``data_age_seconds`` is a fact about the data.
+    PROVIDER_REPORTED = "provider_reported"
+    #: The datum is produced by this request, so it genuinely is as fresh as now — a
+    #: route computed on demand against the current road network. Freshness is real,
+    #: but it describes the computation, not an underlying dataset.
+    LIVE_COMPUTED = "live_computed"
+    #: The source returned data and said nothing about its age. This is the case to be
+    #: careful with: ``observed_at`` is our fetch time, so the datum may be far older
+    #: than it looks, and nothing in the response says by how much.
+    SOURCE_SILENT = "source_silent"
+    #: Not classified. Deliberately the default and deliberately last: an unclassified
+    #: reference must never be treated as provider-reported.
+    UNKNOWN = "unknown"
+
+    @property
+    def age_is_about_the_data(self) -> bool:
+        """Whether ``data_age_seconds`` describes the data rather than our request.
+
+        True only for :attr:`PROVIDER_REPORTED`. Callers that want to warn about
+        genuinely old facts should test this, so an unclassified or silent reference
+        cannot be counted as evidence of freshness.
+        """
+        return self is ObservationBasis.PROVIDER_REPORTED
+
+
 class RevisionAction(StrEnum):
     CHANGE_BUDGET = "change_budget"
     REPLACE_HOTEL = "replace_hotel"
@@ -89,9 +129,17 @@ class SourceReference(BaseModel):
     source: str
     source_type: SourceType
     source_id: str
+    #: When the *datum* is asserted to have been produced or measured. Not the same as
+    #: ``fetched_at``: for a cached or slow-moving source it can be much older, and
+    #: that gap is the fact a reader needs in order to judge whether it still holds.
     observed_at: datetime
+    #: When *we* asked. Always real, and reported separately so a fresh fetch can
+    #: never be mistaken for fresh data.
     fetched_at: datetime
     expires_at: datetime | None = None
+    #: Which of the two times above ``observed_at`` really is. See
+    #: :class:`ObservationBasis`.
+    observed_at_basis: ObservationBasis = ObservationBasis.UNKNOWN
     request_context: dict[str, Any] = Field(default_factory=dict)
     data_version: str = "1"
     confidence: float = Field(default=1.0, ge=0, le=1)
@@ -100,7 +148,35 @@ class SourceReference(BaseModel):
     @computed_field
     @property
     def is_stale(self) -> bool:
+        """Whether our copy has passed its validity window (``expires_at``).
+
+        Distinct from the age of the data itself: a just-fetched copy of a
+        two-year-old dataset is *not* stale by this measure. Use
+        ``data_age_seconds`` and ``observed_at_basis`` to judge the data.
+        """
         return self.expires_at is not None and self.expires_at <= datetime.now(timezone.utc)
+
+    @computed_field
+    @property
+    def data_age_seconds(self) -> int:
+        """How old the datum itself claims to be, in seconds.
+
+        Reported as a number rather than a verdict, because whether an age is
+        acceptable depends on the kind of fact: a day-old restaurant listing is
+        usually fine, a six-hour-old forecast is not. The policy that judges it lives
+        in ``FreshnessService``.
+
+        Never negative. A source reporting a time slightly in our future (clock skew,
+        or a publication time rounded up) must read as "just now" rather than as a
+        negative age, which would make a stale item look fresher than fresh.
+        """
+        moment = self.observed_at
+        if moment.tzinfo is None:
+            # Treat a naive timestamp as UTC rather than guessing a zone. Providers
+            # are expected to supply an aware value; this is a safety net so one
+            # mistake cannot break serialisation of an otherwise valid plan.
+            moment = moment.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
 
 
 class Coordinates(BaseModel):
@@ -574,6 +650,11 @@ class TripPreview(BaseModel):
     provider_health: list[ProviderHealth]
     provider_audit: list[dict[str, Any]] = Field(default_factory=list)
     source_references: list[SourceReference]
+    #: Facts whose *own* age exceeds what their kind allows, so they must not be
+    #: presented as current. A trip is planned for the future, so a stale fact is
+    #: worse than a missing one: it looks like knowledge. Empty is the normal case,
+    #: and an empty list means every contributing fact was within its horizon.
+    stale_facts: list[dict[str, Any]] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

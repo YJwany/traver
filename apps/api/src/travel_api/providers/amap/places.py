@@ -38,6 +38,7 @@ from travel_api.domain.models import (
     DataDomain,
     Hotel,
     Location,
+    ObservationBasis,
     ProviderHealth,
     ProviderResult,
     Restaurant,
@@ -304,6 +305,11 @@ class AmapPlaceProvider:
             observed_at=now,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
+            # AMap's POI response carries no "last updated" field, so nothing here
+            # knows how old the listing is — a closed restaurant can still be returned.
+            # Recorded as silent rather than reported so no downstream reader mistakes
+            # our fetch time for the data's age.
+            observed_at_basis=ObservationBasis.SOURCE_SILENT,
             request_context={
                 "amap_endpoint": PLACE_TEXT_PATH,
                 "category": category,

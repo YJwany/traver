@@ -34,6 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from travel_api.domain.models import (
     Coordinates,
     DataDomain,
+    ObservationBasis,
     ProviderHealth,
     ProviderResult,
     SourceReference,
@@ -99,16 +100,46 @@ def condition_code(description: str) -> int:
 
 
 def _report_time_iso(value: object) -> str | None:
-    """Normalise AMap's ``reporttime``.
+    """AMap's ``reporttime`` verbatim, for the source context.
 
-    AMap returns ``"2025-05-01 08:00:00"``. It is kept as the original string in the
-    source context rather than parsed into a datetime, because it is a *reported*
-    observation time and re-encoding it risks implying a precision or timezone AMap
-    did not state.
+    Kept as the original string as well as parsed into ``observed_at``: the string is
+    what AMap actually said, and some consumers want to display exactly that.
     """
     if not value:
         return None
     return str(value)
+
+
+#: AMap reports ``reporttime`` in China Standard Time (UTC+8) and does not state a
+#: zone. Every other time in this program is UTC, so the value must be interpreted
+#: rather than copied. Assuming UTC instead would place a freshly published forecast
+#: eight hours in the future, which reads as "fresher than fresh" and would mask a
+#: genuinely stale one — the one direction of error that must not happen here.
+AMAP_REPORT_TIME_TZ = timezone(timedelta(hours=8))
+
+#: How AMap formats reporttime. Tried in order; a shape not listed stays unparsed
+#: rather than being guessed at.
+_REPORT_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+
+
+def parse_report_time(value: object) -> datetime | None:
+    """Parse AMap's ``reporttime`` into an aware datetime, or ``None``.
+
+    Returns ``None`` rather than substituting the current time. The caller must then
+    say so, because silently standing in our fetch time for a published observation
+    time would claim the forecast is newer than it is.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in _REPORT_TIME_FORMATS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=AMAP_REPORT_TIME_TZ)
+    logger.warning("AMap reporttime %r did not match any known format", text)
+    return None
 
 
 class AmapWeatherProvider:
@@ -289,16 +320,31 @@ class AmapWeatherProvider:
         unknown_conditions: list[str] | None = None,
     ) -> SourceReference:
         now = datetime.now(timezone.utc)
+        published = parse_report_time(report_time)
         context = {
             "amap_endpoint": WEATHER_PATH,
             "adcode": adcode,
-            # AMap's own observation time, distinct from `fetched_at` below.
+            # AMap's own publication time for this forecast, verbatim as sent.
             "amap_report_time": report_time,
             "attribution": AMAP_ATTRIBUTION.as_credit(),
             "cached": False,
             "absent_fields": "precipitation_mm,precipitation_probability",
             "weather_code_source": "mapped_from_amap_chinese_text",
         }
+        if published is not None:
+            # ``observed_at`` is AMap's publication time, not our fetch time. This is
+            # the whole point of tracking the two separately: a forecast published six
+            # hours ago is six hours old even though we just asked for it, and a
+            # reader deciding whether to trust it needs that number.
+            observed_at = published
+            basis = ObservationBasis.PROVIDER_REPORTED
+            context["amap_report_time_zone"] = "UTC+08:00"
+        else:
+            # AMap gave no usable publication time. Fall back to the fetch time and
+            # *say so*, rather than quietly presenting it as a reported observation.
+            observed_at = now
+            basis = ObservationBasis.SOURCE_SILENT
+            context["amap_report_time_missing"] = True
         if unknown_conditions:
             # Named explicitly so a reader can see which descriptions were not mapped
             # instead of trusting a coded value that means "unknown".
@@ -307,9 +353,10 @@ class AmapWeatherProvider:
             source=self.name,
             source_type=SourceType.OFFICIAL_API,
             source_id=f"amap:weather:{adcode}",
-            observed_at=now,
+            observed_at=observed_at,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
+            observed_at_basis=basis,
             request_context=context,
             data_version="amap-live",
             confidence=0.8,

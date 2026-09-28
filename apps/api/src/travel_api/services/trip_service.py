@@ -72,7 +72,15 @@ class TripService:
         # The owner may arrive as an argument or ambiently; the AI tool path has no
         # argument to pass, which is what ``owner_context`` is for.
         registry = self.provider_registry.for_owner(resolve_owner(owner_id))
-        return await build_preview(profile, registry, budget_strategy, self.budget_engine)
+        return await build_preview(
+            profile,
+            registry,
+            budget_strategy,
+            self.budget_engine,
+            # The policy lives here so every plan is judged by the same rule rather than
+            # by whatever a provider stamped on its own data.
+            self.freshness,
+        )
 
     async def create(
         self,

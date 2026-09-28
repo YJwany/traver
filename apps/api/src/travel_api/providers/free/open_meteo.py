@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from travel_api.domain.models import (
     DataDomain,
+    ObservationBasis,
     ProviderHealth,
     ProviderResult,
     SourceReference,
@@ -181,6 +182,7 @@ class OpenMeteoWeatherProvider:
             source_type=SourceType.OPEN_DATA,
             source_id=f"open-meteo:{place.latitude:.4f},{place.longitude:.4f}",
             observed_at=now,
+            observed_at_basis=ObservationBasis.SOURCE_SILENT,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             request_context={
@@ -295,6 +297,7 @@ class OpenMeteoWeatherProvider:
             source_type=SourceType.OPEN_DATA,
             source_id=f"open-meteo-air-quality:{place.latitude:.4f},{place.longitude:.4f}",
             observed_at=now,
+            observed_at_basis=ObservationBasis.SOURCE_SILENT,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.ttl_seconds),
             request_context={

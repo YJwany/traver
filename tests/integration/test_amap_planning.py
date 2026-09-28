@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 import threading
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -30,7 +30,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from travel_api.config import Settings
-from travel_api.domain.models import Pace, RoutePoint, TravelMode, TripProfile
+from travel_api.domain.models import ObservationBasis, Pace, RoutePoint, TravelMode, TripProfile
 from travel_api.main import create_app
 from travel_api.providers.amap import (
     AMAP_KEY_CREDENTIAL,
@@ -38,6 +38,7 @@ from travel_api.providers.amap import (
     AMAP_ROUTING_PROVIDER_NAME,
     AMAP_WEATHER_PROVIDER_NAME,
 )
+from travel_api.providers.amap.weather import AMAP_REPORT_TIME_TZ
 from travel_api.services.owner_context import acting_as
 
 #: Two well-separated Beijing points, so a route between them is unambiguous.
@@ -173,7 +174,12 @@ def _walking() -> dict:
     }
 
 
-def _weather() -> dict:
+#: AMap's default publication time in the stub, in Beijing time, zone unstated — the
+#: shape the real endpoint sends.
+DEFAULT_REPORT_TIME = "2025-05-01 08:00:00"
+
+
+def _weather(report_time: str = DEFAULT_REPORT_TIME) -> dict:
     return {
         "status": "1",
         "info": "OK",
@@ -184,7 +190,7 @@ def _weather() -> dict:
                 "city": "北京市",
                 "adcode": "110000",
                 "province": "北京",
-                "reporttime": "2025-05-01 08:00:00",
+                "reporttime": report_time,
                 "casts": [
                     {
                         "date": "2025-05-01",
@@ -220,6 +226,9 @@ class _AmapStubHandler(BaseHTTPRequestHandler):
     """Serves the recorded 高德 shapes and records every request it received."""
 
     received: list[tuple[str, dict]] = []
+    #: Overridable per test, so freshness behaviour can be exercised with a forecast
+    #: published minutes ago versus days ago without depending on the wall clock.
+    weather_report_time: str = DEFAULT_REPORT_TIME
 
     def do_GET(self) -> None:  # noqa: N802 - http.server's required name
         parsed = urlparse(self.path)
@@ -238,7 +247,7 @@ class _AmapStubHandler(BaseHTTPRequestHandler):
         elif path == "/v5/direction/walking":
             payload = _walking()
         elif path == "/v3/weather/weatherInfo":
-            payload = _weather()
+            payload = _weather(type(self).weather_report_time)
         else:
             payload = {"status": "0", "info": "UNKNOWN_PATH", "infocode": "20000"}
 
@@ -256,12 +265,16 @@ class _AmapStubHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def amap_stub():
     _AmapStubHandler.received = []
+    # Reset so an override in one test cannot leak into the next, which would make a
+    # freshness assertion pass for the wrong reason.
+    _AmapStubHandler.weather_report_time = DEFAULT_REPORT_TIME
     server = ThreadingHTTPServer(("127.0.0.1", 0), _AmapStubHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}", _AmapStubHandler.received
     finally:
+        _AmapStubHandler.weather_report_time = DEFAULT_REPORT_TIME
         server.shutdown()
         server.server_close()
 
@@ -453,6 +466,105 @@ async def test_the_weather_forecast_carries_amaps_own_report_time(app_client):
     # The adcode came from the stub's geocode response, which the weather endpoint
     # requires — it does not accept a city name.
     assert reference.request_context["adcode"] == "110000"
+
+
+@pytest.mark.asyncio
+async def test_the_forecast_observation_time_is_amaps_not_ours(app_client):
+    """The honesty fix this round is about.
+
+    AMap tells us when it published the forecast. ``observed_at`` must be *that* time,
+    not the moment we asked, or a six-hour-old forecast reads as "observed just now"
+    and a reader has no way to tell. The two times must therefore differ here, and the
+    difference must be the publication lag rather than zero.
+    """
+    key, _ = app_client.app.state.auth_service.mint("owner-a", label="a")
+    app_client.put(
+        f"/api/v1/settings/credentials/{AMAP_PROVIDER_ID}/{AMAP_KEY_CREDENTIAL}",
+        json={"value": STUB_KEY},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    # Published ten minutes ago, in Beijing time, exactly as AMap would send it.
+    published = datetime.now(AMAP_REPORT_TIME_TZ) - timedelta(minutes=10)
+    _AmapStubHandler.weather_report_time = published.strftime("%Y-%m-%d %H:%M:%S")
+
+    registry = app_client.app.state.provider_registry.for_owner("owner-a")
+    provider = next(
+        item
+        for item in registry.providers_for("search_weather")
+        if item.name == AMAP_WEATHER_PROVIDER_NAME
+    )
+    with acting_as("owner-a"):
+        result = await provider.search_weather(_profile())
+
+    reference = result.data[0].source_references[0]
+    assert reference.observed_at_basis is ObservationBasis.PROVIDER_REPORTED
+    assert reference.observed_at_basis.age_is_about_the_data is True
+
+    # observed_at is the publication time; fetched_at is now. They are different facts
+    # and must not have been collapsed into one value.
+    assert reference.observed_at < reference.fetched_at
+    assert 500 <= reference.data_age_seconds <= 900, (
+        f"expected roughly ten minutes of publication lag, got {reference.data_age_seconds}s"
+    )
+    # Correct timezone handling: read as UTC it would sit eight hours in the future,
+    # which would report an age of zero and hide a stale forecast.
+    assert reference.data_age_seconds > 0
+
+
+@pytest.mark.asyncio
+async def test_a_stale_forecast_is_reported_rather_than_presented_as_current(app_client):
+    """The "近期数据" rule, applied end to end.
+
+    A forecast published three days ago is worthless for planning a future trip: it
+    will describe the wrong weather with full confidence. The plan must carry that as
+    a finding, not bury it — an empty ``stale_facts`` is the claim "everything here is
+    within its horizon", which has to be earned.
+    """
+    key, _ = app_client.app.state.auth_service.mint("owner-a", label="a")
+    app_client.put(
+        f"/api/v1/settings/credentials/{AMAP_PROVIDER_ID}/{AMAP_KEY_CREDENTIAL}",
+        json={"value": STUB_KEY},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    old = datetime.now(AMAP_REPORT_TIME_TZ) - timedelta(days=3)
+    _AmapStubHandler.weather_report_time = old.strftime("%Y-%m-%d %H:%M:%S")
+
+    with acting_as("owner-a"):
+        preview = await app_client.app.state.trip_service.preview(_profile())
+
+    assert preview.stale_facts, "a three-day-old forecast must not pass silently"
+    finding = next(item for item in preview.stale_facts if item["data_type"] == "weather")
+    assert finding["reason"] == "too_old"
+    assert finding["data_age_seconds"] > finding["max_age_seconds"]
+    assert finding["source"] == AMAP_WEATHER_PROVIDER_NAME
+    # The two times are both reported, so the reader can see what was fetched when,
+    # and when the verdict itself was reached.
+    assert finding["observed_at"] and finding["fetched_at"]
+    assert finding["evaluated_at"]
+    assert finding["observed_at"] in finding["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_recent_forecast_produces_no_staleness_claim(app_client):
+    """The negative case, so the check cannot be a permanent false alarm.
+
+    A rule that always fires is as useless as one that never does. A forecast
+    published minutes ago must leave ``stale_facts`` empty — otherwise every plan
+    would carry a warning and readers would learn to ignore it.
+    """
+    key, _ = app_client.app.state.auth_service.mint("owner-a", label="a")
+    app_client.put(
+        f"/api/v1/settings/credentials/{AMAP_PROVIDER_ID}/{AMAP_KEY_CREDENTIAL}",
+        json={"value": STUB_KEY},
+        headers={"Authorization": f"Bearer {key}"},
+    )
+    fresh = datetime.now(AMAP_REPORT_TIME_TZ) - timedelta(minutes=2)
+    _AmapStubHandler.weather_report_time = fresh.strftime("%Y-%m-%d %H:%M:%S")
+
+    with acting_as("owner-a"):
+        preview = await app_client.app.state.trip_service.preview(_profile())
+
+    assert [item for item in preview.stale_facts if item["data_type"] == "weather"] == []
 
 
 @pytest.mark.asyncio
