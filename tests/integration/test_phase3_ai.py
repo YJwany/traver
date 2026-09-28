@@ -97,3 +97,35 @@ def test_trip_list_endpoint_returns_persisted_trips(tmp_path):
 
     assert trips.status_code == 200
     assert len(trips.json()) == 1
+
+
+def test_application_starts_with_a_model_configured(tmp_path):
+    """Regression: configuring a model crashed the app on startup.
+
+    ``main.py`` built the adapter with ``default_max_tokens=``, but the adapter's
+    parameter is ``max_tokens``. The resulting TypeError was raised inside the
+    lifespan, so the process died before serving a single request — meaning the
+    one configuration a user must set to bring their own model was the one that
+    could not work.
+
+    Every other test in this file runs with the AI unconfigured, which is exactly
+    why none of them caught it: the failure was only reachable from the state
+    nothing exercised.
+    """
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite:///{tmp_path / 'ai-configured.db'}",
+        auto_create_schema=True,
+        provider_retry_count=0,
+        free_providers_enabled=False,
+        mock_provider_enabled=True,
+        ai_base_url="https://example.invalid/v1",
+        ai_api_key="test-key",
+        ai_model="test-model",
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["ready"] is True

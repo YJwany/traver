@@ -207,7 +207,13 @@ def create_app(
                 api_key=app_settings.ai_api_key,
                 model=app_settings.ai_model,
                 timeout_seconds=app_settings.ai_timeout_seconds,
-                default_max_tokens=app_settings.ai_max_tokens,
+                # Named ``max_tokens`` on the adapter. This used to say
+                # ``default_max_tokens``, which the adapter does not accept, so
+                # configuring a model raised TypeError inside the lifespan and the
+                # process died on startup. No test caught it because every test
+                # ran with the model unconfigured — the one configuration the
+                # failure was reachable from was the one nothing exercised.
+                max_tokens=app_settings.ai_max_tokens,
             )
         app.state.travel_ai_service = TravelAIService(
             trip_service=app.state.trip_service,

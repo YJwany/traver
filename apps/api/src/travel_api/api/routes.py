@@ -16,6 +16,7 @@ from travel_api.domain.models import (
     TripRevisionResult,
 )
 from travel_api.providers.free import attributions_as_dicts
+from travel_api.providers.manifest import capability_matrix, catalog_as_dicts
 from travel_api.services.auth import Principal
 from travel_api.services.trip_service import (
     ConcurrentTripUpdateError,
@@ -95,6 +96,53 @@ async def provider_attributions() -> list[dict[str, str]]:
     displayed, so the Web client renders this list.
     """
     return attributions_as_dicts()
+
+
+def _credentials_configured_from_settings(settings) -> dict[str, set[str]]:
+    """Which credential keys already have a value, from the environment.
+
+    Values are never returned, only the fact that one exists, so this endpoint
+    stays safe to render. Once the credential store exists this becomes a union
+    of environment and stored values; today the environment is the only source.
+    """
+    configured: dict[str, set[str]] = {}
+    ai_keys: set[str] = set()
+    if settings.ai_base_url:
+        ai_keys.add("ai_base_url")
+    if settings.ai_model:
+        ai_keys.add("ai_model")
+    if settings.ai_api_key:
+        ai_keys.add("ai_api_key")
+    if ai_keys:
+        configured["openai-compatible"] = ai_keys
+    return configured
+
+
+@router.get("/providers/catalog", dependencies=[Depends(require_read)])
+async def provider_catalog(request: Request) -> dict:
+    """What this deployment can do now, and what would unlock more.
+
+    Traver ships no data and binds to no model, so "which sources are plugged in"
+    is the whole story of what the program is capable of. This returns the
+    catalogue, the capability matrix, and which credentials are still missing —
+    never a credential value.
+
+    ``planned`` sources (currently 高德/AMap) appear in the catalogue but are
+    deliberately excluded from the matrix, because nothing implements them yet.
+    """
+    settings = request.app.state.settings
+    registry = request.app.state.provider_registry
+    registered = [getattr(provider, "name", "") for provider in registry.all()]
+    configured = _credentials_configured_from_settings(settings)
+
+    catalog = catalog_as_dicts(registered, configured_credentials=configured)
+    matrix = capability_matrix(registered)
+    return {
+        "providers": catalog,
+        "capabilities": matrix,
+        "registered": sorted(name for name in registered if name),
+        "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
+    }
 
 
 @router.get("/tools")
