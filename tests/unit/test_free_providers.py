@@ -24,7 +24,13 @@ from travel_api.domain.models import (
     WeatherForecast,
 )
 from travel_api.providers.free import build_free_providers
-from travel_api.providers.free.geo import SOURCE_NOMINATIM, SOURCE_OPEN_METEO, GeoResolver
+from travel_api.providers.free.geo import (
+    SOURCE_NOMINATIM,
+    SOURCE_OPEN_METEO,
+    GeoResolver,
+    _feature_rank,
+    _score_open_meteo_result,
+)
 from travel_api.providers.free.http import FreeHttpClient
 from travel_api.providers.free.open_meteo import OpenMeteoWeatherProvider
 from travel_api.providers.free.osrm import OsmRoutingProvider
@@ -267,6 +273,274 @@ async def test_geocoder_can_be_pinned_to_a_single_source():
     assert place.source_reference.source == "nominatim"
     assert "geocoding-api.open-meteo.com" not in seen_hosts
     assert "nominatim.openstreetmap.org" in seen_hosts
+    await http.aclose()
+
+
+def test_capital_outranks_a_lesser_administrative_seat():
+    """A national capital must beat a county seat even with a smaller rank gap.
+
+    ``"PPLC"`` does not start with ``"PPLA"``, so testing ``startswith("PPLA")``
+    for the top rank demoted every capital: Paris, France (PPLC) scored 1 while
+    Paris, Texas (PPLA2) scored 2, and because the tuple compares rank before
+    population the 24k-population town beat the 2.1M-population capital.
+    """
+    assert _feature_rank("PPLC") > _feature_rank("PPLA2")
+    assert _feature_rank("PPLC") > _feature_rank("PPLA")
+    assert _feature_rank("PPLA") > _feature_rank("PPLA2")
+    assert _feature_rank("PPLA2") > _feature_rank("PPL")
+
+    capital = {"feature_code": "PPLC", "population": 2138551}
+    small_town = {"feature_code": "PPLA2", "population": 24782}
+    assert _score_open_meteo_result(capital) > _score_open_meteo_result(small_town)
+
+
+async def test_geocoder_prefers_a_capital_over_a_larger_ranked_namesake():
+    """Regression: "巴黎" resolved to Paris, Kentucky, ~8,300 km from France."""
+    payload = {
+        "results": [
+            {
+                "id": 1,
+                "name": "巴黎",
+                "latitude": 48.85341,
+                "longitude": 2.3488,
+                "feature_code": "PPLC",
+                "country": "法国",
+                "country_code": "FR",
+                "population": 2138551,
+                "timezone": "Europe/Paris",
+            },
+            {
+                "id": 2,
+                "name": "巴黎",
+                "latitude": 38.2098,
+                "longitude": -84.253,
+                "feature_code": "PPLA2",
+                "country": "美国",
+                "country_code": "US",
+                "population": 9870,
+                "timezone": "America/New_York",
+            },
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(handler))
+    geo = GeoResolver(http, sources=(SOURCE_OPEN_METEO,))
+    place = await geo.resolve("巴黎")
+    assert place.country_code == "FR"
+    assert place.latitude == pytest.approx(48.85341)
+    await http.aclose()
+
+
+async def test_a_provisional_geocode_is_overridden_by_the_next_source():
+    """Regression: searching 丽江 returned a namesake town 1,154 km away.
+
+    Open-Meteo answers "丽江" with a single ``PPL`` that has no population, in the
+    wrong province. Because that is a non-empty answer the old resolver accepted
+    it and never consulted Nominatim, so the user got a coherent-looking plan for
+    the wrong city. A provisional answer must not stop the search.
+    """
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host or ""
+        seen_hosts.append(host)
+        if host == "geocoding-api.open-meteo.com":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": 1,
+                            "name": "丽江",
+                            "latitude": 28.62428,
+                            "longitude": 113.88887,
+                            "feature_code": "PPL",
+                            "country": "中国",
+                            "country_code": "CN",
+                            "population": None,
+                            "timezone": "Asia/Shanghai",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "place_id": 1,
+                    "osm_id": 99,
+                    "lat": "26.86000",
+                    "lon": "100.22500",
+                    "name": "丽江市",
+                    "display_name": "丽江市, 云南省, 中国",
+                    "class": "boundary",
+                    "type": "administrative",
+                    "boundingbox": ["26.5", "27.2", "99.9", "100.6"],
+                    "address": {"city": "丽江市", "state": "云南省", "country": "中国"},
+                }
+            ],
+        )
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(handler))
+    geo = GeoResolver(http)
+    place = await geo.resolve("丽江")
+
+    assert "nominatim.openstreetmap.org" in seen_hosts, (
+        "the provisional answer must be corroborated"
+    )
+    assert place.source_reference.source == "nominatim"
+    assert place.latitude == pytest.approx(26.86)
+    # The provisional coordinate would have been ~1,150 km east in Hunan.
+    assert place.longitude == pytest.approx(100.225)
+    await http.aclose()
+
+
+async def test_a_confident_geocode_does_not_trigger_a_second_source():
+    """Corroboration must not add a Nominatim call to the common case."""
+    seen_hosts: list[str] = []
+    base = _handler()
+
+    def recording_handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host or "")
+        return base(request)
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(recording_handler))
+    geo = GeoResolver(http)
+    # 成都 is a PPLA with a real population, so it is trusted immediately.
+    await geo.resolve("成都")
+    assert "nominatim.openstreetmap.org" not in seen_hosts
+    await http.aclose()
+
+
+async def test_a_provisional_geocode_is_kept_when_nothing_better_exists():
+    """A provisional answer still beats refusing to plan when the fallback is down."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "geocoding-api.open-meteo.com":
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "id": 1,
+                            "name": "某镇",
+                            "latitude": 30.0,
+                            "longitude": 120.0,
+                            "feature_code": "PPL",
+                            "country": "中国",
+                            "country_code": "CN",
+                            "population": None,
+                            "timezone": "Asia/Shanghai",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(503, text="unavailable")
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(handler))
+    geo = GeoResolver(http)
+    place = await geo.resolve("某镇")
+    assert place.latitude == pytest.approx(30.0)
+    assert place.source_reference.source == "open-meteo-geocoding"
+    await http.aclose()
+
+
+async def test_nominatim_prefers_a_settlement_point_over_a_boundary_centroid():
+    """Regression: 平遥 resolved to its county centroid ~11 km from the old town.
+
+    A ``county`` result reports the centroid of the area, which fell outside the
+    +/-0.045deg search box, so the destination came back with zero POIs even
+    though OSM maps 平遥古城.
+
+    The payload mirrors the live jsonv2 shape, which carries ``addresstype`` and
+    **no** ``class`` field. An earlier version of this test keyed off ``class``
+    and passed against a payload the service never actually returns.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "place_id": 1,
+                    "osm_id": 1,
+                    "lat": "37.1393929",
+                    "lon": "112.2849966",
+                    "name": "平遥县",
+                    "display_name": "平遥县, 晋中市, 山西省, 中国",
+                    "type": "administrative",
+                    "addresstype": "county",
+                    "boundingbox": ["37.0", "37.4", "112.0", "112.5"],
+                    "address": {"county": "平遥县", "city": "晋中市", "country": "中国"},
+                },
+                {
+                    "place_id": 2,
+                    "osm_id": 2,
+                    "lat": "37.2037904",
+                    "lon": "112.1771043",
+                    "name": "平遥县",
+                    "display_name": "平遥县, 晋中市, 山西省, 中国",
+                    "type": "city",
+                    "addresstype": "city",
+                    "boundingbox": ["37.15", "37.25", "112.12", "112.24"],
+                    "address": {"county": "平遥县", "city": "晋中市", "country": "中国"},
+                },
+            ],
+        )
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(handler))
+    geo = GeoResolver(http, sources=(SOURCE_NOMINATIM,))
+    place = await geo.resolve("平遥")
+    assert place.latitude == pytest.approx(37.2037904)
+    assert place.longitude == pytest.approx(112.1771043)
+    await http.aclose()
+
+
+async def test_nominatim_will_not_jump_to_a_distant_namesake():
+    """The settlement preference must stay local.
+
+    Every geocode has a namesake somewhere, so "prefer the settlement type" has
+    to be bounded or it would replace one wrong-city result with another.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "place_id": 1,
+                    "osm_id": 1,
+                    "lat": "30.0000",
+                    "lon": "120.0000",
+                    "name": "某县",
+                    "display_name": "某县, 中国",
+                    "type": "administrative",
+                    "addresstype": "county",
+                    "address": {"county": "某县", "country": "中国"},
+                },
+                {
+                    # Same name, but on another continent: must be ignored.
+                    "place_id": 2,
+                    "osm_id": 2,
+                    "lat": "48.0000",
+                    "lon": "2.0000",
+                    "name": "某县",
+                    "display_name": "某县, 法国",
+                    "type": "city",
+                    "addresstype": "city",
+                    "address": {"city": "某县", "country": "法国"},
+                },
+            ],
+        )
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(handler))
+    geo = GeoResolver(http, sources=(SOURCE_NOMINATIM,))
+    place = await geo.resolve("某县")
+    assert place.latitude == pytest.approx(30.0)
+    assert place.longitude == pytest.approx(120.0)
     await http.aclose()
 
 

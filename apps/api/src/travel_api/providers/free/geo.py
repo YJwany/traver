@@ -12,6 +12,7 @@ optional fallback that additionally supplies a real administrative bounding box.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -81,21 +82,133 @@ def _clamp_bbox(
     )
 
 
+#: GeoNames feature codes, most significant first. These are the levels that
+#: actually occur as geocoding candidates.
+_PPLC = "PPLC"  # capital of a political entity
+_PPLA = "PPLA"  # seat of a first-order administrative division
+_PPLA_LOWER = "PPLA2"  # seat of a second-order (and lower) division
+_PPL = "PPL"  # populated place
+
+
+def _feature_rank(feature_code: str) -> int:
+    """Rank a GeoNames feature code by how likely it is the intended city.
+
+    ``PPLC`` (a national capital) must outrank ``PPLA2`` (a county seat). The
+    previous implementation tested ``startswith("PPLA")`` as the top rank, which
+    silently demoted *every capital*: ``"PPLC"`` does not start with ``"PPLA"``,
+    so Paris, France (PPLC, population 2.1M) ranked 1 while Paris, Texas
+    (PPLA2, population 24k) ranked 2. Because the score tuple compares rank
+    before population, the small town won and the resolver returned a point
+    ~8,300 km away — with a plausible-looking place record and no error.
+    """
+    if feature_code == _PPLC:
+        return 4
+    if feature_code == _PPLA:
+        return 3
+    if feature_code.startswith(_PPLA_LOWER):
+        return 2
+    if feature_code.startswith(_PPL):
+        return 1
+    return 0
+
+
 def _score_open_meteo_result(result: dict) -> tuple[int, float]:
-    """Prefer populated places, then population.
+    """Prefer administrative seats, then population.
 
     Open-Meteo happily returns a village named like a major city; ranking by
     feature code and population keeps the well-known place first.
     """
     feature_code = str(result.get("feature_code") or "")
-    is_populated = feature_code.startswith("PPL")
-    # PPLA/PPLA2.. are administrative capitals and rank above generic PPL.
-    rank = 2 if feature_code.startswith("PPLA") else 1 if is_populated else 0
-    return rank, float(result.get("population") or 0)
+    return _feature_rank(feature_code), float(result.get("population") or 0)
+
+
+#: Confidence attached to a geocode, and the level below which another source is
+#: consulted. A rank-1 ``PPL`` with no population is the case that matters: it
+#: is how Open-Meteo reports a small town, and it is also how it reports a
+#: *wrong* small town. Treating that as provisional is what lets the more precise
+#: source override it.
+_CONFIDENT_GEOCODE = 0.9
+_PROVISIONAL_GEOCODE = 0.5
+_MINIMUM_TRUSTED_CONFIDENCE = 0.8
 
 
 SOURCE_OPEN_METEO = "open-meteo"
 SOURCE_NOMINATIM = "nominatim"
+
+#: Ask for several candidates rather than one, so a settlement point can be
+#: preferred over an administrative boundary (see `_pick_nominatim_result`).
+#: This costs nothing extra: it is the same single request.
+_NOMINATIM_LIMIT = 5
+
+#: Nominatim result types that denote an actual settlement *point*.
+#:
+#: The discriminator is ``addresstype`` (falling back to ``type``), not
+#: ``class``: the live jsonv2 responses for these queries carry no ``class``
+#: field at all, so keying off it would never match. An area type such as
+#: ``county`` reports the centroid of the area, which can sit well away from the
+#: town it is named after.
+_NOMINATIM_SETTLEMENT_TYPES = frozenset(
+    {"city", "town", "village", "hamlet", "municipality", "borough"}
+)
+
+#: How far a settlement point may sit from the top-ranked result and still count
+#: as a refinement of it. Without this cap, "prefer the settlement" would swap
+#: one wrong-city bug for another by jumping to a distant namesake.
+_NOMINATIM_REFINEMENT_KM = 50.0
+
+
+def _nominatim_kind(result: object) -> str:
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("addresstype") or result.get("type") or "").strip().lower()
+
+
+def _rough_distance_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    """Cheap planar distance; adequate for a 50 km locality check."""
+    mean_lat = math.radians((lat_a + lat_b) / 2)
+    dy = (lat_a - lat_b) * 111.0
+    dx = (lon_a - lon_b) * 111.0 * math.cos(mean_lat)
+    return math.hypot(dx, dy)
+
+
+def _pick_nominatim_result(results: list) -> dict:
+    """Choose the Nominatim candidate that best identifies the destination.
+
+    Prefers a settlement point over an administrative area, because only the
+    former is guaranteed to sit on the place itself: 平遥县 resolved to its county
+    centroid ~11 km from 平遥古城, outside the +/-0.045deg search box, so the
+    destination came back with zero POIs even though OSM maps the old town.
+
+    The refinement is bounded by `_NOMINATIM_REFINEMENT_KM`, so it can only move
+    a result within its own locality. Falls back to the first result, which is
+    Nominatim's own relevance ordering.
+    """
+    fallback = next((item for item in results if isinstance(item, dict)), None)
+    if fallback is None:
+        return results[0]
+
+    try:
+        anchor_lat, anchor_lon = float(fallback["lat"]), float(fallback["lon"])
+    except (KeyError, TypeError, ValueError):
+        return fallback
+
+    for result in results:
+        result_class = (
+            str(result.get("class") or "").strip().lower() if isinstance(result, dict) else ""
+        )
+        is_settlement = (
+            result_class == "place" or _nominatim_kind(result) in _NOMINATIM_SETTLEMENT_TYPES
+        )
+        if not is_settlement:
+            continue
+        try:
+            lat, lon = float(result["lat"]), float(result["lon"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _rough_distance_km(lat, lon, anchor_lat, anchor_lon) <= _NOMINATIM_REFINEMENT_KM:
+            return result
+    return fallback
+
 
 #: Default order: Open-Meteo first because it is keyless, fast and returns the
 #: IANA timezone the forecast endpoint needs; Nominatim as a fallback because it
@@ -164,11 +277,36 @@ class GeoResolver:
         # a failure here means the source is genuinely down and the next one is
         # tried. Geocoding gates every other free provider, so having a fallback
         # source matters more than knowing which one failed.
+        #
+        # A candidate is also re-tried when it is only *provisional*, not merely
+        # when a source fails. Sources fail loudly; they also succeed while being
+        # wrong, and a wrong-but-plausible coordinate is the more dangerous case:
+        # it propagates into every POI, route and weather call and the user sees a
+        # coherent plan for a city they never asked for. Searching "丽江"
+        # (Yunnan) returned a single PPL named 丽江 in Hunan, 1,154 km away, and
+        # because that is a non-empty answer the fallback never ran.
         place: GeoPlace | None = None
+        provisional: GeoPlace | None = None
         for source in self.sources:
-            place = await self._try_source(self._resolver_for(source), destination, source)
-            if place is not None:
+            candidate = await self._try_source(self._resolver_for(source), destination, source)
+            if candidate is None:
+                continue
+            if candidate.source_reference.confidence >= _MINIMUM_TRUSTED_CONFIDENCE:
+                place = candidate
                 break
+            if provisional is None:
+                provisional = candidate
+            logger.debug(
+                "geocoding via %s was provisional for %r (confidence %.2f); "
+                "consulting the next source",
+                source,
+                destination,
+                candidate.source_reference.confidence,
+            )
+
+        # Fall back to the provisional answer only if nothing better was found:
+        # an imperfect coordinate still beats refusing to plan at all.
+        place = place or provisional
         if place is None:
             raise GeoResolutionError(
                 f"无法解析目的地坐标: {destination} (已尝试: {', '.join(self.sources)})"
@@ -199,6 +337,7 @@ class GeoResolver:
         if not results:
             return None
         best = max(results, key=_score_open_meteo_result)
+        rank, population = _score_open_meteo_result(best)
         latitude = float(best["latitude"])
         longitude = float(best["longitude"])
         return GeoPlace(
@@ -213,9 +352,18 @@ class GeoResolver:
             source_reference=self._source_reference(
                 source="open-meteo-geocoding",
                 source_id=str(best.get("id", destination)),
+                # A bare populated place with no population figure is exactly how
+                # this endpoint reports an obscure namesake. Keep it, but flag it
+                # as provisional so a more precise source gets a chance.
+                confidence=(
+                    _CONFIDENT_GEOCODE
+                    if rank >= _feature_rank(_PPLA) and population > 0
+                    else _PROVISIONAL_GEOCODE
+                ),
                 request_context={
                     "destination": destination,
                     "admin1": best.get("admin1"),
+                    "feature_code": best.get("feature_code"),
                     "attribution": OPEN_METEO_ATTRIBUTION,
                 },
             ),
@@ -227,13 +375,13 @@ class GeoResolver:
             params={
                 "q": destination,
                 "format": "jsonv2",
-                "limit": 1,
+                "limit": _NOMINATIM_LIMIT,
                 "addressdetails": 1,
             },
         )
         if not isinstance(payload, list) or not payload:
             return None
-        best = payload[0]
+        best = _pick_nominatim_result(payload)
         latitude = float(best["lat"])
         longitude = float(best["lon"])
 
@@ -265,16 +413,19 @@ class GeoResolver:
             source_reference=self._source_reference(
                 source="nominatim",
                 source_id=str(best.get("osm_id", destination)),
+                confidence=_CONFIDENT_GEOCODE,
                 request_context={
                     "destination": destination,
                     "display_name": best.get("display_name"),
+                    "result_class": best.get("class"),
+                    "result_type": best.get("type"),
                     "attribution": OSM_ATTRIBUTION,
                 },
             ),
         )
 
     def _source_reference(
-        self, *, source: str, source_id: str, request_context: dict
+        self, *, source: str, source_id: str, request_context: dict, confidence: float = 0.85
     ) -> SourceReference:
         now = datetime.now(timezone.utc)
         return SourceReference(
@@ -287,7 +438,7 @@ class GeoResolver:
             expires_at=now + timedelta(days=30),
             request_context=request_context,
             data_version="osm-live",
-            confidence=0.85,
+            confidence=confidence,
             domain=DataDomain.GEO_FACT,
         )
 

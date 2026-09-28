@@ -32,7 +32,7 @@ Phase 0-4 的可运行底座已经落地：
 | 天气 | Open-Meteo | CC BY 4.0 | 免费额度非商用，< 10k 次/天 |
 | 空气质量 / 紫外线 | Open-Meteo Air Quality | CC BY 4.0 | 同上；仅覆盖未来 7 天 |
 | 路线 | OSRM demo（FOSSGIS） | ODbL 1.0 | 不超过 1 次/秒 |
-| 地理编码 | Open-Meteo Geocoding，Nominatim 兜底 | CC BY 4.0 / ODbL 1.0 | Nominatim 不超过 1 次/秒 |
+| 地理编码 | Open-Meteo Geocoding，Nominatim 兜底（结果不可靠时也触发） | CC BY 4.0 / ODbL 1.0 | Nominatim 不超过 1 次/秒 |
 | 景点简介 | 中文维基百科 / Wikidata | CC BY-SA 4.0 / CC0 | 机器人需串行请求 |
 | 公共节假日 | `holidays` 库（本地数据） | MIT | 无网络请求 |
 
