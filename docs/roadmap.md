@@ -1,7 +1,7 @@
 # Roadmap
 
 > 各 Phase 下的测试数量是**该阶段当时**的计数，用于记录当时的覆盖范围，不代表当前总数。
-> 当前总数见 Phase 4C 一节：204 个离线测试 + 8 个可选真实网络测试。
+> 当前总数见 Phase 6 一节：291 个离线测试（含 29 个 Web 端 Vitest）+ 8 个可选真实网络测试。
 
 ## Phase 0 — 项目侦察与架构底座（完成）
 
@@ -13,7 +13,7 @@
 
 - FastAPI、版本化 API、配置、日志、CORS、健康检查
 - `PostgreSQL/PostGIS、Redis Compose 服务`：Redis 服务仍在 compose 中，但只作为 `extras` profile 供本地实验，API 不读取它（见文末"配置卫生"）
-- Next.js Web 占位
+- Next.js Web 骨架（当时是占位；功能在 Phase 3B 落地，认证与管理页在 Phase 6 补齐）
 
 ## Phase 2 — 持久化 Travel Engine（完成）
 
@@ -93,12 +93,51 @@
 
 - 自建 OSRM 实例以支持真实步行/骑行路径（公共 demo 只提供驾车路径）
 - 高德/天气与正式授权商业 Provider（房价、库存、评分）
-- 真实 API 认证、限流、重试、熔断、缓存和数据用途审查
+- 面向出站调用的商业来源凭据轮换、配额与数据用途审查
+  （入站认证与限流见 Phase 6；这里指的是**调用第三方**时的凭据与合规治理）
 
-## Phase 6 — Production hardening
+## Phase 6 — Production hardening（部分完成）
 
-- 生产部署、认证与租户隔离、乐观锁、可观测性、CI、负载与浏览器 E2E
-- Web 端展示数据来源署名与天气（ODbL/CC BY 4.0 要求可见署名）
+### 已完成
+
+**写入门禁修复（先于功能，因为它是正确性漏洞）**
+
+- `POST /tools/{name}` 曾无条件传入 `allow_write=True`，使 AI 工具路径上的写意图检查可被任何直接调用该端点的客户端完全绕过；现由请求本身推导，并补齐 HTTP 层回归测试
+- 写意图正则此前会把否定句判为写入请求（"不要预订"被读成预订）；现在先检测否定
+
+**认证与租户隔离**
+
+- Bearer API Key，服务端只保存 SHA-256 摘要与 12 字符显示前缀，明文不落库
+- 行程按属主隔离：一把密钥读不到另一把密钥创建的行程
+- `python -m travel_api.cli` 提供 create-key / list-keys / revoke-key
+- `AUTH_ENABLED` 默认 `false` 以便本机开发，且 `/api/v1/health` 会报告当前认证模式——未加固的部署不会被误认为已加固
+
+**入站限流与边界配置**
+
+- 按客户端（优先按属主、退化到 IP）的固定窗口限流，AI 端点有更紧的独立预算
+- 限流器**返回等待秒数而非抛异常**：在 HTTP 中间件里抛 `HTTPException` 会绕过 FastAPI 的异常处理器，最终表现为 500
+- CORS 来源可配置；就绪探针真正往返数据库，而不是只判断进程存活
+
+**工程基建**
+
+- 乐观锁（`expected_version`，冲突返回 409）与有界列表分页
+- `requirements.lock` 与 `apps/web/package-lock.json`，CI 与本地解析到同一组版本
+- 生产镜像：非 root、不挂载源码、从锁文件安装、就绪探针有独立退出码契约
+- `docker-compose.yml` 增加 `prod` profile，`POSTGRES_PASSWORD` 无默认值（未设置则拒绝启动）
+- CI 三个作业：API（ruff + pytest）、Migrations（upgrade→downgrade→upgrade + autogenerate 漂移检查）、Web（tsc + lint + vitest + build + 产物密钥扫描）
+- Web 端 API Key 入口与 `.env` 之外的运行时配置；密钥刻意不走 `NEXT_PUBLIC_*`，因为该前缀会被内联进构建产物
+
+**署名履行**（原列在 Phase 6 待办，实际上早已随 Phase 4C 落地）
+
+- Workspace 页面渲染 ODbL / CC BY 4.0 要求的可见署名，来源与许可经 `/api/v1/providers/attributions` 提供
+- 天气与节假日各有独立面板，并标明数据性质（预报值而非实测、节假日不覆盖景点自身数据）
+
+### 未完成
+
+- 浏览器 E2E 与负载测试
+- 可观测性目前只有带 `request_id` 的结构化日志，**没有 metrics 与 tracing**
+- Web 端凭据仍是 `localStorage`：对同源脚本可读，一次 XSS 即可窃取。面向多人或公网部署时应改为后端签发 httpOnly Cookie 会话
+- 会话级权限细分（当前只有 `trip:read` / `trip:write` 两个 scope）
 
 ## 配置卫生（随 Phase 4 完成）
 
