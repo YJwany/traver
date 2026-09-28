@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Protocol
 
+from travel_api.domain.ingestion import FactKind
 from travel_api.domain.models import (
     TRAVEL_MODE_LABELS,
     Attraction,
@@ -16,6 +17,7 @@ from travel_api.domain.models import (
     Pace,
     ProviderHealth,
     ProviderResult,
+    ResolvedPlace,
     Restaurant,
     RoutePoint,
     TravelMode,
@@ -192,6 +194,31 @@ def _build_ingested_notes(
     # confident the reading was.
     notes.sort(key=lambda item: (item["kind"] not in _CAUTION_KINDS, item["kind"], item["text"]))
     return notes
+
+
+def _unmatched_place_names(notes: list[dict]) -> list[str]:
+    """The distinct place names in ``notes`` that matched no aggregated entity.
+
+    Derived from the notes rather than by re-running the matching, so there is exactly one
+    implementation of "did this mention attach to something". A second copy of that rule would
+    eventually disagree with the first, and the disagreement would be invisible: the note list
+    would say a mention was unmatched while the lookup treated it as matched, or the reverse,
+    and nothing in the output would show which was right.
+
+    Only ``place_mention`` facts qualify. A price or a tip has no name to look up, and its
+    ``text`` is a sentence — geocoding it would ask a gazetteer where 「人均约 80 元」 is.
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for note in notes:
+        if note.get("kind") != FactKind.PLACE_MENTION.value or note.get("matched"):
+            continue
+        name = str(note.get("text") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 async def _safe_call(registry: ProviderRegistry, provider, method: str, *args) -> ProviderResult:
@@ -466,6 +493,37 @@ async def build_preview(
         attractions = [replacements.get(item.id, item) for item in attractions]
     await reporter.finish_step()
 
+    # The traveller's own notes are matched against the entities just aggregated. Done here,
+    # once, *before* anything consumes the result: the matching rule is the thing both the
+    # note list and the place lookup depend on, and computing it twice would let the two
+    # disagree about which mentions had nowhere to attach.
+    ingested_notes = _build_ingested_notes(
+        list(ingestions or []), hotels=hotels, restaurants=restaurants, attractions=attractions
+    )
+
+    # Places the traveller's own notes named and our data sources did *not* have: exactly the
+    # set that had nowhere to attach, and the reason the note could not be used.
+    #
+    # They are located rather than scheduled. Being named in a post is evidence that somebody
+    # liked a place; it is not this traveller's decision to go there, and the plan does not make
+    # that decision for them. So the outcome is a list of places with coordinates and a status,
+    # never an itinerary item — and never an ``Attraction``, which would carry ratings, prices
+    # and opening hours that nothing measured here.
+    unmatched_places = _unmatched_place_names(ingested_notes)
+    await reporter.step(
+        "resolve_places",
+        f"{len(unmatched_places)} 个文中提到的地点" if unmatched_places else "无未匹配的地名，跳过",
+    )
+    place_results = (
+        await _call_capability(registry, "resolve_places", unmatched_places, profile)
+        if unmatched_places
+        else []
+    )
+    resolved_places = [
+        item for result in place_results for item in result.data if isinstance(item, ResolvedPlace)
+    ]
+    await reporter.finish_step()
+
     decisions = score_hotel_offers(hotels, offers, profile)
     selected_offer = None
     if decisions and not decisions[0].failed_constraints:
@@ -576,18 +634,21 @@ async def build_preview(
     # stamp the data.
     freshness = freshness_service or FreshnessService()
 
-    # The traveller's own notes are matched against the entities just aggregated, so a
-    # pasted 小红书 note lands next to the place it is about instead of in a separate
-    # list the reader has to reconcile by hand.
-    ingested = list(ingestions or [])
-    ingested_notes = _build_ingested_notes(
-        ingested, hotels=hotels, restaurants=restaurants, attractions=attractions
-    )
+    # ``ingested_notes`` was computed above, before the place lookup, so the note list and the
+    # set of lookups both come from one application of the matching rule.
+    #
     # Their references join the plan's citations. An ingested note is a source like any
     # other, and one that is not cited is one whose origin cannot be checked.
-    content_refs = [item.source_reference() for item in ingested]
+    content_refs = [item.source_reference() for item in (ingestions or [])]
     refs = [*refs, *content_refs]
     typed_refs += [("user_content", ref) for ref in content_refs]
+    # Citations for the place lookups join the list too, including the ones that found nothing
+    # and the ones that found the name somewhere else. A lookup is a data source like any
+    # other: its result is only checkable if it is cited, and 「在别处」 with no citation is an
+    # assertion the reader cannot verify.
+    place_refs = [ref for result in place_results for ref in result.source_references]
+    refs = [*refs, *place_refs]
+    typed_refs += [("place_lookup", ref) for ref in place_refs]
     # Judged once, after every reference that belongs to this plan has been added —
     # including the traveller's notes. An undated note is reported as age-unknown and a
     # dated-but-old one as too old, without either being treated as current merely because
@@ -611,6 +672,7 @@ async def build_preview(
         + [_audit_entry("search_weather", result) for result in weather_results]
         + [_audit_entry("search_holidays", result) for result in holiday_results]
         + [_audit_entry("enrich_attractions", result) for result in enrichment_results]
+        + [_audit_entry("resolve_places", result) for result in place_results]
     )
     preview = TripPreview(
         profile=profile,
@@ -630,6 +692,7 @@ async def build_preview(
         stale_facts=stale_facts,
         age_unknown_facts=age_unknown_facts,
         ingested_notes=ingested_notes,
+        ingested_places=[place.model_dump(mode="json") for place in resolved_places],
         generated_at=datetime.now(timezone.utc),
     )
     # Closed after the result exists, so a step never reports finished while its own

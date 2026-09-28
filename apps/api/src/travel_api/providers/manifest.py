@@ -38,6 +38,7 @@ CAPABILITY_LABELS: dict[str, str] = {
     "search_weather": "天气",
     "search_holidays": "节假日",
     "enrich_attractions": "景点简介",
+    "resolve_places": "地名定位",
 }
 
 #: The parts a capability decomposes into, for capabilities where one provider
@@ -228,6 +229,26 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         ),
     ),
     ProviderManifest(
+        id="openstreetmap-places",
+        label="地名定位（Open-Meteo + Nominatim）",
+        kind="data",
+        status=STATUS_AVAILABLE,
+        capabilities=("resolve_places",),
+        provider_names=("openstreetmap-places",),
+        cost_note="免费、免密钥",
+        freshness_note="地名索引的更新时间来源不公布，因此只标注抓取时间",
+        docs_url="https://nominatim.org/release-docs/latest/api/Search/",
+        # 同名地点是这个能力最大的风险，所以把「怎么消歧」和「消歧到什么程度」直接写在清单里，
+        # 而不是留给用户去猜。`MAX_DISTANCE_FROM_DESTINATION_KM` 是一个真实的上限：
+        # 80 公里内有两个同名地点时，这里仍然可能选错。
+        caveats=(
+            "同名地点用「离目的地最近」消歧：查询会限定在目的地附近的范围内，"
+            "超出 80 公里的结果会作为「在别处」明确报告而不是悄悄丢弃",
+            "只是把地名落到坐标上：不会给出评分、票价、营业时间，也不会当作已选中的行程项",
+            "80 公里内若有多个同名地点仍可能选错；要区分它们需要一个知道行政归属的来源",
+        ),
+    ),
+    ProviderManifest(
         id="osrm",
         label="OSRM 路线（默认 FOSSGIS）",
         kind="data",
@@ -297,6 +318,7 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             "search_hotels",
             "calculate_routes",
             "search_weather",
+            "resolve_places",
         ),
         credentials=(
             CredentialField(
@@ -327,6 +349,8 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             "公交/地铁规划是 OSRM 完全没有的能力，这是接入它的主要理由",
             "服务条款禁止存储或缓存其结果，因此本程序对它不做任何缓存，每次规划都是实时请求",
             "个人免费配额自注册认证之日起计一年，之后需付费",
+            "有 Key 时，笔记里提到的中文地名优先由它定位：国内地名的覆盖明显好于免费来源，"
+            "并且能限定在目的地城市内查询；结果仍然只作为「文中提到的地点」，不会变成景点",
         ),
     ),
     ProviderManifest(
@@ -347,7 +371,11 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             "提取是规则式的：价格、时长、开放/闭馆时间、提示、警告、地名，每条都附上原文出处",
             "提取出来的是「某人说的」，不是测量值：它只以估算和提示的形式进入行程，"
             "绝不会覆盖高德的实测路线或报价",
-            "地名只有在地理编码成功后才能进入路线；没有坐标时只作为「文中提到的地点」列出",
+            "地名会按目的地做地理编码。但定位成功也只是「文中提到的地点」：它没有评分、票价、"
+            "营业时间，也不会被排进某一天——笔记说某人喜欢某处，不等于你决定要去",
+            "同名地点用「离目的地最近」消歧；80 公里外的一律标为「在别处」并给出距离，不当作笔记所指",
+            "地名本身是提取器的读法，遇到本身含「桥」「巷」这类后缀的名字会被截短"
+            "（断桥残雪 → 断桥）；这是提取器的已知限制，不是定位环节的问题",
         ),
     ),
     ProviderManifest(

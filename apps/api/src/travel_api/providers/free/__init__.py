@@ -48,6 +48,11 @@ from travel_api.providers.free.open_meteo import OpenMeteoWeatherProvider
 from travel_api.providers.free.opening_hours import parse_opening_hours
 from travel_api.providers.free.osrm import OsmRoutingProvider
 from travel_api.providers.free.overpass import OverpassPoiProvider
+from travel_api.providers.free.places import (
+    FREE_PLACE_RESOLVER_NAME,
+    MAX_DISTANCE_FROM_DESTINATION_KM,
+    FreePlaceResolver,
+)
 from travel_api.providers.free.wikipedia import (
     WikipediaContentProvider,
     normalize_wikipedia_tag,
@@ -56,14 +61,17 @@ from travel_api.providers.free.wikipedia import (
 __all__ = [
     "DEFAULT_HOLIDAY_LANGUAGE",
     "DEFAULT_USER_AGENT",
+    "FREE_PLACE_RESOLVER_NAME",
     "HOLIDAYS_ATTRIBUTION",
     "HOLIDAYS_SOURCE",
+    "MAX_DISTANCE_FROM_DESTINATION_KM",
     "OPEN_DATA_ATTRIBUTIONS",
     "SOURCE_NOMINATIM",
     "SOURCE_OPEN_METEO",
     "WIKIPEDIA_ATTRIBUTION",
     "Attribution",
     "FreeHttpClient",
+    "FreePlaceResolver",
     "GeoPlace",
     "GeoResolutionError",
     "GeoResolver",
@@ -161,6 +169,16 @@ def build_free_providers(
             timeout_seconds=timeout_seconds,
             ttl_seconds=weather_ttl_seconds,
             air_quality_enabled=air_quality_enabled,
+        ),
+        # Shares the destination's own geocoding sources *and its resolver*, so place lookups
+        # scope to the same coordinate the POIs were found around and the destination is
+        # geocoded once per process rather than once per capability. Nothing new is contacted.
+        FreePlaceResolver(
+            http=http,
+            geo_resolver=geo_resolver,
+            language=language,
+            timeout_seconds=timeout_seconds,
+            nominatim_fallback=nominatim_fallback,
         ),
     ]
 

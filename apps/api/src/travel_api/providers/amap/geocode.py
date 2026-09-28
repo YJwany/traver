@@ -105,17 +105,66 @@ class AmapGeocoder:
         if not query:
             return None
 
-        try:
-            payload = await self.client.get(GEOCODE_PATH, params={"address": query})
-        except AmapError as exc:
-            logger.warning("AMap geocode failed for %r: %s", query, exc)
+        candidates = await self.candidates(query)
+        if not candidates:
             return None
+
+        best = min(candidates, key=_rank)
+        self.last_place = best
+        self.last_query = query
+        return best
+
+    async def candidates(
+        self, query: str, *, city: str | None = None, raise_on_error: bool = False
+    ) -> list[AmapPlace]:
+        """Every result AMap offers for ``query``, optionally limited to one city.
+
+        Separate from :meth:`resolve` because the two want opposite things from the same
+        endpoint. Resolving a *trip destination* wants one answer, and wants it to be the
+        administrative area rather than a POI named after the city. Resolving a *place
+        named in somebody's note* wants every candidate, so the caller can pick the one
+        near the destination — and wants no administrative preference at all, since 灵隐寺
+        is a 风景名胜 and outranking it in favour of a same-named 区县 would be exactly
+        backwards.
+
+        ``city`` is AMap's own scoping parameter, and it accepts a city *name* as well as an
+        adcode. Passing it is the difference between searching the destination and searching
+        the country: 人民公园 returns dozens of results nationwide without it.
+
+        ``raise_on_error`` decides what a transport or API failure means, and the default is
+        the opposite of what it is for the destination path:
+
+        * ``False`` (the destination's behaviour) — a failure means "this source cannot
+          answer", so the caller moves on to the next one. Swallowing it is right there.
+        * ``True`` — a failure is *reported*. 高德 distinguishes an invalid key from an
+          exhausted quota, and both from "no such place", and a caller that flattens them all
+          into an empty result cannot tell a user which of the three they have. For a place
+          named in a note there is no next source to fall through to, so the error is the
+          whole answer and must survive.
+
+        Returns an empty list for a blank query, always. There is nothing to report about a
+        query that was never made.
+        """
+        text = (query or "").strip()
+        if not text:
+            return []
+
+        params: dict[str, str] = {"address": text}
+        if city:
+            params["city"] = city
+        try:
+            payload = await self.client.get(GEOCODE_PATH, params=params)
+        except AmapError as exc:
+            logger.warning("AMap geocode failed for %r (city=%r): %s", text, city, exc)
+            if raise_on_error:
+                raise
+            return []
 
         geocodes = payload.get("geocodes")
         if not isinstance(geocodes, list):
-            return None
+            return []
 
-        candidates: list[AmapPlace] = []
+        out: list[AmapPlace] = []
         for item in geocodes:
             if not isinstance(item, dict):
                 continue
@@ -125,7 +174,7 @@ class AmapGeocoder:
             if coordinates is None:
                 continue
             latitude, longitude = coordinates
-            candidates.append(
+            out.append(
                 AmapPlace(
                     formatted_address=str(item.get("formatted_address") or ""),
                     province=str(item.get("province") or "").strip() or None,
@@ -137,14 +186,7 @@ class AmapGeocoder:
                     level=str(item.get("level") or "").strip() or None,
                 )
             )
-
-        if not candidates:
-            return None
-
-        best = min(candidates, key=_rank)
-        self.last_place = best
-        self.last_query = query
-        return best
+        return out
 
     async def adcode_for(self, destination: str) -> str | None:
         place = await self.resolve(destination)

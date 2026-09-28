@@ -141,6 +141,32 @@ class ContentProvider(Protocol):
 
 
 @runtime_checkable
+class PlaceResolverProvider(Protocol):
+    """Locates names the traveller's own material mentioned, and says what it did.
+
+    Its own capability rather than part of ``AttractionProvider``, for the reason the
+    capability *is* different: searching for POIs asks a dataset what exists near a point,
+    while this asks a geocoder where a specific name is. A source can obviously do one and
+    not the other — the free stack's POI search (Overpass) has no geocoder at all, and AMap's
+    geocoder was written before any of this existed.
+
+    There is no location parameter, and its absence is deliberate. The disambiguation a bare
+    name needs comes from the trip's own destination, and each implementation resolves that
+    from ``profile`` with *the same geocoder its POI search uses*. Passing the centre in would
+    let a caller point the lookups at one coordinate while the POIs were gathered around
+    another, and nothing in the result would show the disagreement.
+
+    The implementation is responsible for using that location — by scoping the query, by
+    rejecting a result outside it, or both — and for reporting a resolution it rejected rather
+    than dropping it silently.
+    """
+
+    name: str
+
+    async def resolve_places(self, names: list[str], profile: TripProfile) -> ProviderResult: ...
+
+
+@runtime_checkable
 class HealthProvider(Protocol):
     name: str
 
@@ -162,6 +188,7 @@ CAPABILITY_BY_METHOD: dict[str, type] = {
     "search_weather": WeatherProvider,
     "search_holidays": HolidayProvider,
     "enrich_attractions": ContentProvider,
+    "resolve_places": PlaceResolverProvider,
 }
 
 #: Capabilities a provider implements structurally but does not actually serve.

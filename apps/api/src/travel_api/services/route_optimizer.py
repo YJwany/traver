@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from math import asin, ceil, cos, radians, sin, sqrt
+from math import ceil
 
+from travel_api.domain.geo import straight_line_meters
 from travel_api.domain.models import (
     Attraction,
     Itinerary,
@@ -289,14 +290,13 @@ def _coordinate_index(attractions: list[Attraction], restaurants: list[Restauran
 
 
 def _haversine_meters(origin: tuple[float, float], destination: tuple[float, float]) -> float:
-    """Great-circle distance in metres."""
-    earth_radius = 6_371_000.0
-    lat1, lon1 = radians(origin[0]), radians(origin[1])
-    lat2, lon2 = radians(destination[0]), radians(destination[1])
-    delta_lat = lat2 - lat1
-    delta_lon = lon2 - lon1
-    a = sin(delta_lat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(delta_lon / 2) ** 2
-    return 2 * earth_radius * asin(sqrt(a))
+    """Great-circle distance in metres.
+
+    Delegates to ``domain/geo`` so there is one implementation: the place resolver needs the
+    same measurement to reject a namesake far from the destination, and two copies of a
+    formula is how one of them quietly acquires a different earth radius.
+    """
+    return straight_line_meters(origin, destination)
 
 
 def _derive_minutes(straight_line_meters: float, profile: TripProfile) -> int:

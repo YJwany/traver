@@ -435,6 +435,78 @@ class RoutePoint(BaseModel):
         return Coordinates(latitude=self.latitude, longitude=self.longitude)
 
 
+class PlaceResolutionStatus(StrEnum):
+    """What a source did with a name it was asked to locate.
+
+    Four outcomes, and the reason they are four rather than a boolean is that the reader's
+    next move differs for each. Collapsing them is how "we did not look" becomes
+    indistinguishable from "we looked and found nothing", which reads as "this place does
+    not exist" — a claim nobody made.
+
+    This is the same distinction ``_disclose_unserved_travel_mode`` draws between a mode no
+    source can serve and a source that answered and refused.
+    """
+
+    #: The source returned a coordinate, and it is plausibly the place the text meant.
+    LOCATED = "located"
+    #: The source returned a coordinate that is not near the destination the text is about.
+    #: 西湖 exists in several cities; the note is about one of them.
+    ELSEWHERE = "elsewhere"
+    #: The source was asked and had nothing. A real answer, and a different one from
+    #: :attr:`NOT_ATTEMPTED`.
+    NOT_FOUND = "not_found"
+    #: No configured source serves place resolution at all, so nothing was asked. Reported
+    #: apart from ``NOT_FOUND`` because telling someone「没有找到这个地方」when in fact
+    #: nobody looked is a fabrication, and it is the fabrication a partial deployment
+    #: produces most often.
+    NOT_ATTEMPTED = "not_attempted"
+
+
+class ResolvedPlace(BaseModel):
+    """A name from the traveller's own material, put on the map — or not, and why.
+
+    This is deliberately **not** an :class:`Attraction`. An attraction is a POI discovered by
+    a data source, carrying that source's rating, ticket price and opening hours. This is a
+    place *a note mentioned*, and the differences are the ones that matter:
+
+    * it has no rating, no price and no opening hours, because nothing measured them;
+    * its coordinate comes from a geocoder reading a name out of prose, so the coordinate is
+      a reading, not a survey — which is why the geocoder's own confidence is carried;
+    * it exists because somebody wrote about it, so its provenance is the note, not a dataset.
+
+    Keeping it a separate type is the structural part of 「必须与实测 POI 明确区分开来」: no
+    code that consumes ``Attraction`` can accidentally receive one of these, because it is
+    not one. A boolean flag on ``Attraction`` would have been a comment, not a constraint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The name as queried, which is the extractor's reading of the prose.
+    name: str
+    status: PlaceResolutionStatus
+    #: Set only when :attr:`status` is ``LOCATED``. Absent otherwise, never defaulted to a
+    #: plausible-looking point: a wrong coordinate here becomes a stop in somebody's day.
+    coordinates: Coordinates | None = None
+    #: What the source calls the place, when it answered. Shown so a reader can see the
+    #: match was 「春熙路」 → 「春熙路步行街」 rather than taking it on trust.
+    display_name: str | None = None
+    #: The source's own confidence in the match, when it states one. ``None`` means the
+    #: source did not say, which is not the same as being sure.
+    match_confidence: float | None = Field(default=None, ge=0, le=1)
+    #: Straight-line distance from the destination centre, in kilometres. Named for what it
+    #: is: this is great-circle distance, not a road distance, and no travel time is derived
+    #: from it here.
+    straight_line_from_centre_km: float | None = Field(default=None, ge=0)
+    #: Why this status, in the source's or the resolver's words. Never empty for a
+    #: non-``LOCATED`` outcome, because "elsewhere" with no explanation is a puzzle.
+    reason: str = ""
+    #: The geocoder's citation. Present whenever a source was actually asked, including for
+    #: ``ELSEWHERE`` and ``NOT_FOUND`` — the lookup is a source like any other, and its
+    #: result is only checkable if it is cited. Absent for ``NOT_ATTEMPTED``, where there is
+    #: nothing to cite.
+    source_reference: SourceReference | None = None
+
+
 class RouteLeg(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -795,6 +867,22 @@ class TripPreview(BaseModel):
     #: fields — a remembered price must not stand in for a quoted rate, and a blogger's
     #: "2 hours is enough" must not overwrite a measured visit duration.
     ingested_notes: list[dict[str, Any]] = Field(default_factory=list)
+    #: Places the traveller's own material named, located on the map when a source could
+    #: resolve the name, with the outcome stated for the rest.
+    #:
+    #: Reported **apart from** ``attractions`` rather than merged into them, and the reason is
+    #: the product's honesty rule rather than tidiness. An attraction on this plan was found
+    #: by a data source and carries that source's measured fields; one of these was named in
+    #: somebody's post and then geocoded from a name, which is a reading. Merging them would
+    #: make 「笔记里提到的店」 indistinguishable from 「查到的景点」 in every consumer at
+    #: once — including the itinerary, which would start scheduling recommendations the
+    #: traveller never chose.
+    #:
+    #: These are located, not scheduled. A name in a note is evidence that somebody liked a
+    #: place; it is not a decision by this traveller to go there, and the plan does not make
+    #: that decision on their behalf. The list exists so the gap between "mentioned" and "in
+    #: your plan" is visible and actionable rather than silently closed.
+    ingested_places: list[dict[str, Any]] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

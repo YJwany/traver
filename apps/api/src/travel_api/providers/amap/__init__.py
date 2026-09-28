@@ -25,6 +25,12 @@ from travel_api.providers.amap.client import (
     AmapQuotaError,
 )
 from travel_api.providers.amap.geocode import AmapGeocoder, AmapPlace
+from travel_api.providers.amap.place_resolver import (
+    AMAP_PLACE_RESOLVER_NAME,
+    AmapPlaceResolver,
+    amap_confidence,
+    amap_precision,
+)
 from travel_api.providers.amap.places import AmapPlaceProvider, amap_stable_id
 from travel_api.providers.amap.routing import AmapRoutingProvider
 from travel_api.providers.amap.weather import AmapWeatherProvider
@@ -32,6 +38,7 @@ from travel_api.providers.amap.weather import AmapWeatherProvider
 __all__ = [
     "AMAP_KEY_CREDENTIAL",
     "AMAP_PLACE_PROVIDER_NAME",
+    "AMAP_PLACE_RESOLVER_NAME",
     "AMAP_PROVIDER_ID",
     "AMAP_PROVIDER_NAMES",
     "AMAP_ROUTING_PROVIDER_NAME",
@@ -43,9 +50,12 @@ __all__ = [
     "AmapKeyError",
     "AmapPlace",
     "AmapPlaceProvider",
+    "AmapPlaceResolver",
     "AmapQuotaError",
     "AmapRoutingProvider",
     "AmapWeatherProvider",
+    "amap_confidence",
+    "amap_precision",
     "amap_stable_id",
     "build_amap_providers",
 ]
@@ -69,6 +79,10 @@ AMAP_PROVIDER_NAMES: tuple[str, ...] = (
     AMAP_ROUTING_PROVIDER_NAME,
     AMAP_PLACE_PROVIDER_NAME,
     AMAP_WEATHER_PROVIDER_NAME,
+    # The place resolver. A fourth name because the registry keys providers by name, so
+    # reusing ``amap-places`` would silently discard one of the two — the failure this tuple
+    # exists to prevent.
+    AMAP_PLACE_RESOLVER_NAME,
 )
 
 
@@ -128,4 +142,10 @@ def build_amap_providers(
             ttl_seconds=ttl_seconds,
             geocoder=geocoder,
         ),
+        # Shares the geocoder with the weather provider: both need the trip's city, and one
+        # instance means a trip resolves it once rather than once per capability.
+        #
+        # No cache TTL, for the same reason the geocoder has none: 高德's terms forbid storing
+        # results, so every lookup is a live request against the owner's own quota.
+        AmapPlaceResolver(client, geocoder=geocoder),
     ]
