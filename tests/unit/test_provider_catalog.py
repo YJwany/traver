@@ -57,42 +57,107 @@ def test_every_declared_provider_name_is_actually_registered():
     Checks against the stack ``build_free_providers`` really returns, so renaming
     a provider without updating its manifest fails here instead of quietly
     reporting the capability as unavailable.
+
+    A credential-gated source is checked against the objects its own factory builds.
+    That is the *stronger* check of the two: it proves the name is real, and it also
+    proves the factory still runs at all, which a name comparison against a constant
+    would not.
     """
     registered = _free_stack_names()
-    declared = {
+    keyless = {
         name
         for manifest in PROVIDER_CATALOG
         for name in manifest.provider_names
-        if manifest.status != STATUS_PLANNED
+        if manifest.status == STATUS_AVAILABLE
     }
-    assert declared <= registered, f"declared but not registered: {sorted(declared - registered)}"
+    assert keyless <= registered, f"declared but not registered: {sorted(keyless - registered)}"
+
+    # Credential-gated names must come from the real factory, not just be spelled
+    # the same way somewhere.
+    credential_gated = {
+        name
+        for manifest in PROVIDER_CATALOG
+        for name in manifest.provider_names
+        if manifest.status == STATUS_NEEDS_CREDENTIALS
+    }
+    if credential_gated:
+        assert credential_gated <= _credentialed_stack_names(), (
+            f"declared but not built: {sorted(credential_gated - _credentialed_stack_names())}"
+        )
 
 
-def test_planned_sources_contribute_no_capabilities():
-    """高德 is declared but not written yet, so it must not appear as coverage.
+def _credentialed_stack_names() -> set[str]:
+    """Names the credential-gated factory really produces, for the AMap source.
 
-    The failure this guards against is subtle and would be self-flattering: the
-    matrix would show every capability covered because the catalogue happens to
-    mention a source that does it, while in reality nothing does.
+    Uses a placeholder key: this asserts construction and naming, never a real call.
+    """
+    from travel_api.providers.amap import build_amap_providers
+
+    providers = build_amap_providers(key="test-key-not-used-for-requests", http=object())
+    return {getattr(provider, "name", "") for provider in providers}
+
+
+def test_a_source_needing_credentials_contributes_no_capabilities_until_configured():
+    """高德 is implemented but inert without a key, so it must not appear as coverage.
+
+    The failure this guards against is subtle and self-flattering: the matrix would
+    show 公交/地铁 covered because the catalogue happens to mention 高德, while in
+    reality nothing in a zero-credential deployment can plan a subway journey. That
+    is precisely the overstatement this matrix exists to prevent.
+
+    Note ``is_usable`` means *implemented*, not *active*: 高德 is usable in that sense
+    while still being absent from a keyless deployment's coverage.
     """
     amap = manifest_for("amap")
     assert amap is not None
-    assert amap.status == STATUS_PLANNED
-    assert not amap.is_usable
+    assert amap.status == STATUS_NEEDS_CREDENTIALS
+    assert amap.is_usable, "needs_credentials means implemented, so it is usable once keyed"
+    assert amap.credentials, "it must declare the credential that activates it"
 
+    # The factory really does build it, so the name is not decorative.
+    assert "amap" in _credentialed_stack_names()
+
+    # But with only the keyless stack registered it is not coverage.
     matrix = capability_matrix(registered_names=_free_stack_names())
     for row in matrix:
-        assert "amap" not in row["providers"], "a planned source must not count as coverage"
+        assert "amap" not in row["providers"], (
+            "a source with no credential must not count as coverage"
+        )
+
+    # Routing is the case that matters: 公交/地铁 must still be reported as a gap.
+    aspects = uncovered_aspects(_free_stack_names())
+    assert any(item["aspect"] == "transit" for item in aspects), (
+        "transit must stay an uncovered aspect until a key is configured"
+    )
 
 
-def test_planned_source_is_reported_with_its_blockers():
-    """The UI needs to explain what is missing, not just that something is."""
+def test_every_source_that_needs_credentials_declares_the_field_to_enter():
+    """The settings page can only ask for what the manifest declares.
+
+    A source in this state with no credential field would be impossible to activate
+    from the UI, so it would read as permanently unavailable.
+    """
+    needing = [m for m in PROVIDER_CATALOG if m.status == STATUS_NEEDS_CREDENTIALS]
+    assert needing, "this test is vacuous unless some source needs credentials"
+    for manifest in needing:
+        assert manifest.credentials, f"{manifest.id} needs credentials but declares none"
+        assert any(field.required for field in manifest.credentials), (
+            f"{manifest.id} declares only optional credentials, so nothing would activate it"
+        )
+        assert manifest.caveats, f"{manifest.id} must explain what is missing"
+
+
+def test_the_amap_manifest_no_longer_claims_to_be_unimplemented():
+    """The old text said 尚未实现. Leaving it would understate a working source, which
+    is the mirror image of the overstatement the matrix is meant to prevent."""
     amap = manifest_for("amap")
     assert amap is not None
-    assert amap.credentials, "a planned source must still declare what it will need"
-    assert any("尚未实现" in caveat for caveat in amap.caveats), (
-        "the caveats must say plainly that it is not implemented"
+    assert not any("尚未实现" in caveat for caveat in amap.caveats)
+    assert any("Key" in caveat for caveat in amap.caveats), (
+        "the caveats must say plainly that a key of your own is required"
     )
+    # The no-caching rule is a licence obligation, so it is stated rather than implied.
+    assert any("缓存" in caveat for caveat in amap.caveats)
 
 
 # -- the matrix reflects what is registered --------------------------------

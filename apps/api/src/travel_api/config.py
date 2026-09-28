@@ -84,6 +84,26 @@ class Settings(BaseSettings):
     )
     osrm_base_url: str = ""
 
+    # -- AMap / 高德 ------------------------------------------------------
+    #: Whether owners may plug in an AMap key. Off means the catalogue still lists
+    #: the source but no credentialed provider is ever built, so an operator can
+    #: withdraw it without editing code.
+    amap_enabled: bool = True
+    #: Overrides the API host, for a proxy or an offline test double.
+    amap_base_url: str = "https://restapi.amap.com"
+    #: Lifetime stamped on AMap data. Deliberately minutes, not hours, and there is
+    #: no in-process cache for it: AMap's terms forbid storing or caching results,
+    #: so every call is a live call. That is also what makes route and POI data
+    #: genuinely current rather than "current as of whenever we last looked" — and
+    #: the ToS reason and the freshness reason point the same way.
+    amap_ttl_seconds: int = 300
+    #: AMap's distance-matrix endpoint accepts at most 100 origins per request.
+    amap_max_matrix_origins: int = 100
+    #: Requests per second allowed against the AMap host. The free personal quota
+    #: is a monthly call count, not a rate, but a limiter keeps a burst from
+    #: tripping the per-second guard AMap also enforces.
+    amap_requests_per_second: float = 5.0
+
     auto_create_schema: bool = True
 
     # -- Authentication ----------------------------------------------------

@@ -77,6 +77,17 @@ WIKIPEDIA_ATTRIBUTION = Attribution(
     licence="CC BY-SA 4.0",
 )
 
+#: AMap is not open data — it is an official commercial API with its own terms.
+#: It still requires a visible credit ("© 高德地图") wherever its data appears, so
+#: it is served through the same endpoint. Listing it here rather than in the AMap
+#: package keeps the rule that a new source cannot ship without its credit.
+AMAP_ATTRIBUTION = Attribution(
+    provider="amap",
+    text="© 高德地图（AMap）",
+    url="https://lbs.amap.com/",
+    licence="高德开放平台服务条款",
+)
+
 #: Everything that must be displayed when free-provider data is shown.
 OPEN_DATA_ATTRIBUTIONS: tuple[Attribution, ...] = (
     OSM_ATTRIBUTION,
@@ -84,6 +95,7 @@ OPEN_DATA_ATTRIBUTIONS: tuple[Attribution, ...] = (
     OSRM_ATTRIBUTION,
     HOLIDAYS_ATTRIBUTION,
     WIKIPEDIA_ATTRIBUTION,
+    AMAP_ATTRIBUTION,
 )
 
 
@@ -92,6 +104,11 @@ def attribution_for(provider_name: str) -> Attribution | None:
     for item in OPEN_DATA_ATTRIBUTIONS:
         if item.provider == normalized:
             return item
+    # Checked before the fuzzy rules below on purpose: an AMap provider name such
+    # as "amap-driving-routes" contains "route" and would otherwise be credited to
+    # OSRM, crediting the wrong project and dropping a required AMap notice.
+    if "amap" in normalized or "高德" in normalized:
+        return AMAP_ATTRIBUTION
     # Both the POI and geocoding providers publish OSM-derived data.
     if any(token in normalized for token in ("openstreetmap", "overpass", "nominatim")):
         return OSM_ATTRIBUTION

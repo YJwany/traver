@@ -138,16 +138,21 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
     catalogue, the capability matrix, and which credentials are still missing —
     never a credential value.
 
-    ``planned`` sources (currently 高德/AMap) appear in the catalogue but are
-    deliberately excluded from the matrix, because nothing implements them yet.
+    ``planned`` sources appear in the catalogue but are deliberately excluded from
+    the matrix, because nothing implements them yet.
 
     ``uncovered_aspects`` is reported separately from ``uncovered_capabilities``.
     A missing capability is a visible absence; a missing *aspect* means a feature
     works for some journeys and silently not for others — routing without 公交/地铁
     being the case that matters, since a flat "routing: covered" would hide it.
+
+    The registry is scoped to the caller, so the answer is what *this* owner can do.
+    That matters now that a source can be per-owner: reporting the process-wide set
+    would show 高德 as unavailable to an owner who has configured it, and, worse,
+    would show it as available to one who has not.
     """
     settings = request.app.state.settings
-    registry = request.app.state.provider_registry
+    registry = request.app.state.provider_registry.for_owner(principal.owner_id)
     registered = [getattr(provider, "name", "") for provider in registry.all()]
     configured = _credentials_configured(principal.owner_id, request)
 

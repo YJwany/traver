@@ -19,6 +19,7 @@ from travel_api.providers.registry import ProviderRegistry
 from travel_api.services.aggregation import build_preview
 from travel_api.services.budget_engine import BudgetEngine
 from travel_api.services.freshness import FreshnessService
+from travel_api.services.owner_context import resolve_owner
 from travel_api.services.route_optimizer import RouteOptimizer
 
 
@@ -57,11 +58,21 @@ class TripService:
         self.budget_engine = budget_engine or BudgetEngine()
 
     async def preview(
-        self, profile, budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED
+        self,
+        profile,
+        budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
+        *,
+        owner_id: str | None = None,
     ):
-        return await build_preview(
-            profile, self.provider_registry, budget_strategy, self.budget_engine
-        )
+        # Scoped per call, not per process: which sources exist depends on whose
+        # credentials are in play, so two owners can get different data from one
+        # deployment. ``for_owner`` returns the shared registry unchanged when
+        # nothing is configured, so the zero-credential path is unaffected.
+        #
+        # The owner may arrive as an argument or ambiently; the AI tool path has no
+        # argument to pass, which is what ``owner_context`` is for.
+        registry = self.provider_registry.for_owner(resolve_owner(owner_id))
+        return await build_preview(profile, registry, budget_strategy, self.budget_engine)
 
     async def create(
         self,
@@ -70,7 +81,7 @@ class TripService:
         *,
         owner_id: str | None = None,
     ) -> Trip:
-        preview = await self.preview(profile, budget_strategy)
+        preview = await self.preview(profile, budget_strategy, owner_id=owner_id)
         trip = Trip(
             profile=profile,
             preview=preview,
@@ -148,7 +159,9 @@ class TripService:
     async def refresh(self, trip_id: UUID, *, owner_id: str | None = None) -> Trip:
         trip = self.get(trip_id, owner_id=owner_id)
         preview = await self.preview(
-            trip.profile, trip.budget.strategy if trip.budget else BudgetStrategyName.BALANCED
+            trip.profile,
+            trip.budget.strategy if trip.budget else BudgetStrategyName.BALANCED,
+            owner_id=owner_id,
         )
         next_trip = trip.model_copy(
             update={
@@ -184,7 +197,9 @@ class TripService:
         update.pop("budget_strategy", None)
         update.pop("expected_version", None)
         profile = trip.profile.model_copy(update=update)
-        preview = await self.preview(profile, patch.budget_strategy or BudgetStrategyName.BALANCED)
+        preview = await self.preview(
+            profile, patch.budget_strategy or BudgetStrategyName.BALANCED, owner_id=owner_id
+        )
         next_trip = trip.model_copy(
             update={
                 "profile": profile,
@@ -229,7 +244,7 @@ class TripService:
         if request.action.value == "replace_hotel":
             next_trip = self._replace_hotel(trip, request.constraints)
         elif request.action.value == "change_budget":
-            next_trip = await self._change_budget(trip, request.constraints)
+            next_trip = await self._change_budget(trip, request.constraints, owner_id=owner_id)
         elif request.action.value == "remove_attraction":
             next_trip = self._remove_attraction(trip, request.constraints)
         elif request.action.value == "change_pace":
@@ -476,7 +491,13 @@ class TripService:
             }
         )
 
-    async def _change_budget(self, trip: Trip, constraints: dict[str, Any]) -> Trip:
+    async def _change_budget(
+        self,
+        trip: Trip,
+        constraints: dict[str, Any],
+        *,
+        owner_id: str | None = None,
+    ) -> Trip:
         total_budget = Decimal(str(constraints["total_budget"]))
         hotel_budget = (
             Decimal(str(constraints["hotel_budget"]))
@@ -486,8 +507,14 @@ class TripService:
         profile = trip.profile.model_copy(
             update={"total_budget": total_budget, "hotel_budget": hotel_budget}
         )
+        # The owner is forwarded explicitly rather than left to the ambient context.
+        # This revision rebuilds the whole preview, so losing the owner here would
+        # silently drop a credentialed provider — the re-planned trip would quietly
+        # fall back to the free sources and produce worse routes than the first plan.
         preview = await self.preview(
-            profile, constraints.get("strategy", BudgetStrategyName.STRICT)
+            profile,
+            constraints.get("strategy", BudgetStrategyName.STRICT),
+            owner_id=owner_id,
         )
         return trip.model_copy(
             update={

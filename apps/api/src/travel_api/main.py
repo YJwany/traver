@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,8 +18,15 @@ from travel_api.config import Settings, get_settings
 from travel_api.db.session import Database
 from travel_api.db.uow import UnitOfWork
 from travel_api.logging_config import configure_logging, reset_request_id, set_request_id
+from travel_api.providers.amap import (
+    AMAP_KEY_CREDENTIAL,
+    AMAP_PROVIDER_ID,
+    AmapKeyError,
+    build_amap_providers,
+)
 from travel_api.providers.fixture import FixtureTravelProvider
 from travel_api.providers.free import build_free_providers
+from travel_api.providers.free.http import FreeHttpClient
 from travel_api.providers.mock import MockTravelProvider
 from travel_api.providers.registry import ProviderRegistry
 from travel_api.providers.resilience import ProviderCallPolicy, ProviderRuntime
@@ -33,6 +41,7 @@ from travel_api.services.credentials import (
 )
 from travel_api.services.freshness import FreshnessPolicy, FreshnessService
 from travel_api.services.model_runtime import ModelRuntime
+from travel_api.services.owner_context import reset_current_owner, set_current_owner
 from travel_api.services.tool_registry import build_default_tool_registry
 from travel_api.services.travel_ai import TravelAIService
 from travel_api.services.trip_service import TripService
@@ -239,6 +248,58 @@ def create_app(
             locked_reason=credential_key_error,
         )
         credential_resolver = CredentialResolver(credential_vault, app_settings)
+
+        # AMap gets its own HTTP client rather than borrowing the free stack's.
+        # Borrowing it made AMap depend on ``free_providers_enabled``: with the free
+        # sources switched off there was no client, the factory was never installed,
+        # and a saved 高德 key silently did nothing. Its rate limit is also its own,
+        # because the per-second guard AMap enforces is not the one the community
+        # endpoints need.
+        amap_http_client = None
+        if app_settings.amap_enabled:
+            amap_host = httpx.URL(app_settings.amap_base_url).host or "restapi.amap.com"
+            amap_http_client = FreeHttpClient(
+                user_agent=app_settings.free_provider_user_agent,
+                timeout_seconds=app_settings.free_provider_request_timeout_seconds,
+                host_intervals={
+                    amap_host: 1.0 / max(app_settings.amap_requests_per_second, 0.1),
+                },
+                retry_count=app_settings.free_provider_retry_count,
+                retry_backoff_seconds=app_settings.free_provider_retry_backoff_seconds,
+            )
+
+        def credentialed_providers(owner_id: str | None) -> list[object]:
+            """Sources that only exist for an owner who supplied a key.
+
+            Called per request, so a key saved in the settings page is used by the
+            very next plan without a restart — and a removed key stops being used,
+            which a cached provider instance would not.
+
+            Returns an empty list when nothing is configured, which is the normal
+            state: Traver plans complete trips with no credentials at all, so this is
+            an upgrade path rather than a requirement.
+            """
+            if amap_http_client is None:
+                return []
+            key = credential_resolver.value(owner_id, AMAP_PROVIDER_ID, AMAP_KEY_CREDENTIAL)
+            if not key:
+                return []
+            try:
+                return build_amap_providers(
+                    key=key,
+                    http=amap_http_client,
+                    base_url=app_settings.amap_base_url,
+                    timeout_seconds=app_settings.free_provider_timeout_seconds,
+                    ttl_seconds=app_settings.amap_ttl_seconds,
+                )
+            except AmapKeyError:
+                # A stored value that is blank or whitespace. Treated as "not
+                # configured" so planning proceeds on the free sources rather than
+                # failing because of an unusable setting.
+                logger.warning("AMap credential for owner %r is unusable", owner_id)
+                return []
+
+        registry.set_credential_provider_factory(credentialed_providers)
         model_runtime = ModelRuntime(
             credential_resolver,
             default_base_url=app_settings.ai_base_url,
@@ -290,6 +351,8 @@ def create_app(
         finally:
             if free_http_client is not None:
                 await free_http_client.aclose()
+            if amap_http_client is not None:
+                await amap_http_client.aclose()
             database.engine.dispose()
 
     app = FastAPI(
@@ -307,6 +370,11 @@ def create_app(
         # `request_id=%(request_id)s` log field is a permanent "-" and a log
         # line cannot be matched to the x-request-id response header.
         token = set_request_id(request_id)
+        # Bind the owner for the whole request as well, so the deep AI tool path -
+        # which has no owner argument to forward - still uses the caller's own
+        # credentials. Reset in the ``finally`` so one request cannot leak its
+        # owner into the next use of this task.
+        owner_token = set_current_owner(None)
         started = time.perf_counter()
         try:
             # Resolve the credential here, once, so that (a) the rate limiter can
@@ -324,6 +392,10 @@ def create_app(
                 except AuthenticationError as exc:
                     request.state.principal = None
                     request.state.auth_error = str(exc)
+                else:
+                    principal = getattr(request.state, "principal", None)
+                    if principal is not None:
+                        set_current_owner(principal.owner_id)
 
             limiter = getattr(request.app.state, "rate_limiter", None)
             if limiter is not None and _is_rate_limited_path(request.url.path):
@@ -361,6 +433,7 @@ def create_app(
             return response
         finally:
             reset_request_id(token)
+            reset_current_owner(owner_token)
 
     allowed_origins = app_settings.cors_origin_list()
     # Browsers reject credentials together with a wildcard origin, so a wildcard
@@ -371,7 +444,11 @@ def create_app(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_credentials=allow_credentials,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        # PUT is required: saving a credential uses PUT
+        # /settings/credentials/{provider}/{key}. Without it the browser's CORS
+        # preflight rejects the request, and the failure surfaces only in the browser
+        # console as a generic network error while the API looks healthy.
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["*"],
     )
     app.include_router(router)

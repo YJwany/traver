@@ -226,12 +226,11 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         id="amap",
         label="高德地图（AMap）",
         kind="data",
-        status=STATUS_PLANNED,
+        status=STATUS_NEEDS_CREDENTIALS,
         capabilities=(
-            "search_hotels",
-            "search_room_offers",
-            "search_restaurants",
             "search_attractions",
+            "search_restaurants",
+            "search_hotels",
             "calculate_routes",
             "search_weather",
         ),
@@ -251,14 +250,18 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             ),
         ),
         provider_names=("amap",),
-        aspects=(("calculate_routes", ("driving", "transit", "walking", "cycling")),),
+        #: Only three aspects, not four. ``TravelMode`` has no cycling member and
+        #: ``mode_for_pace`` cannot return one, so nothing can ever request a cycling
+        #: route: claiming it would put a capability in the matrix that no
+        #: itinerary can actually exercise.
+        aspects=(("calculate_routes", ("driving", "transit", "walking")),),
         cost_note="个人认证开发者非商业用途每月有免费配额，超出后按量计费",
-        freshness_note="按请求实时查询，国内 POI 与路线显著优于 OSM",
+        freshness_note="按请求实时查询并如实标注抓取时间；不缓存，这既是时效性要求也是服务条款要求",
         docs_url="https://lbs.amap.com/",
         caveats=(
-            "尚未实现：状态为 planned，现在不提供任何能力",
+            "需要自己的 Web 服务 Key；未配置时不影响免费数据源出攻略",
             "公交/地铁规划是 OSRM 完全没有的能力，这是接入它的主要理由",
-            "服务条款禁止存储或缓存其结果，接入时需按实时查询设计",
+            "服务条款禁止存储或缓存其结果，因此本程序对它不做任何缓存，每次规划都是实时请求",
             "个人免费配额自注册认证之日起计一年，之后需付费",
         ),
     ),
