@@ -61,14 +61,14 @@ describe("timeAgo", () => {
 describe("freshnessLabel", () => {
   it("says 实时计算 only when the datum was produced by this request", () => {
     const label = freshnessLabel(reference(BASIS_LIVE_COMPUTED, minutesAgo(1)));
-    expect(label).toBe("实时计算");
+    expect(label).toContain("实时计算");
   });
 
   it("states the real age when the source reported an observation time", () => {
     const label = freshnessLabel(reference(BASIS_PROVIDER_REPORTED, minutesAgo(90)));
     // The data's own age, not the fetch age — this is the number that decides whether
     // the fact is worth anything.
-    expect(label).toBe("数据 1 小时前");
+    expect(label).toContain("数据 1 小时前");
   });
 
   it("admits that a silent source's data age is unknown", () => {
@@ -85,7 +85,7 @@ describe("freshnessLabel", () => {
     const silent = reference(BASIS_SOURCE_SILENT, minutesAgo(0));
     expect(silent.is_stale).toBe(false);
     expect(freshnessLabel(silent)).not.toBe("实时");
-    expect(freshnessLabel(silent)).not.toBe("实时计算");
+    expect(freshnessLabel(silent)).not.toContain("实时计算");
   });
 
   it("treats an unclassified basis as unknown rather than as fresh", () => {
@@ -110,9 +110,54 @@ describe("freshnessLabel", () => {
     const justFetchedOldData = reference(BASIS_PROVIDER_REPORTED, minutesAgo(60 * 24 * 30), minutesAgo(0));
     const justComputed = reference(BASIS_LIVE_COMPUTED, minutesAgo(0));
 
-    expect(freshnessLabel(justFetchedOldData)).toBe("数据 30 天前");
-    expect(freshnessLabel(justComputed)).toBe("实时计算");
+    expect(freshnessLabel(justFetchedOldData)).toContain("数据 30 天前");
+    expect(freshnessLabel(justComputed)).toContain("实时计算");
     expect(freshnessLabel(justFetchedOldData)).not.toBe(freshnessLabel(justComputed));
+  });
+
+  it("states the fetch time for every basis, because that is the one time always known", () => {
+    // The requirement, in the user's words: 「什么时候拉取到的数据就标注为什么时候的」.
+    //
+    // This is the test the two branches above were missing. They asserted the data-age
+    // half of the label and never the fetch half, so 实时计算 and 数据 30 天前 shipped
+    // without saying when we looked — in exactly the two cases that occur most often.
+    // A label that answers "how old is the data" but not "when did you ask" leaves a plan
+    // opened a week later reading as though it were current.
+    for (const basis of [
+      BASIS_LIVE_COMPUTED,
+      BASIS_PROVIDER_REPORTED,
+      BASIS_SOURCE_SILENT,
+      BASIS_UNKNOWN,
+    ]) {
+      const label = freshnessLabel(reference(basis, minutesAgo(5), minutesAgo(5)));
+      expect(label).toContain("抓取于");
+      // And it has to be a *time*, not the word alone: the fetch is 5 minutes old here.
+      expect(label).toContain("5 分钟前");
+    }
+  });
+
+  it("keeps a live-computed label from reading as 实时 when the plan is old", () => {
+    // The specific misreading. "实时计算" is present tense about a past event: the route
+    // was computed live, but that was three days ago. Only the fetch time says so.
+    const computedThreeDaysAgo = reference(
+      BASIS_LIVE_COMPUTED,
+      minutesAgo(60 * 24 * 3),
+      minutesAgo(60 * 24 * 3),
+    );
+    const label = freshnessLabel(computedThreeDaysAgo);
+
+    expect(label).toContain("3 天前");
+    // Bare 实时计算 is what it used to be, and on its own it reads as "just now".
+    expect(label).not.toBe("实时计算");
+  });
+
+  it("shows both times when the source reported one", () => {
+    // The panel tells the reader 「抓取时间与数据自身时间分别标注」, so both must be there
+    // rather than one standing in for the other.
+    const label = freshnessLabel(reference(BASIS_PROVIDER_REPORTED, minutesAgo(90), minutesAgo(2)));
+
+    expect(label).toContain("数据 1 小时前");
+    expect(label).toContain("抓取于 2 分钟前");
   });
 });
 

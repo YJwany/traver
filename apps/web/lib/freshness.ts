@@ -53,14 +53,31 @@ export function freshnessClass(source: AnyRecord | undefined, estimated = false)
 export function freshnessLabel(source: AnyRecord | undefined, estimated = false): string {
   if (estimated) return "估算";
   if (source?.is_stale) return "已过期";
+  // Every branch states the fetch time, and it is stated first for the two bases that
+  // cannot carry it alone.
+  //
+  // The fetch time is the one thing that is always known: we made the call, so we know
+  // when. `observed_at` is only meaningful when the source published it. Stating the
+  // data's age *instead of* the fetch time looked like the more useful number, and it hid
+  // two problems:
+  //
+  //  * "实时计算" is present tense about a past event. A plan opened three days after it
+  //    was made still said 实时计算, which reads as "computed just now" — the route was
+  //    computed live, at the moment we fetched it, and only the fetch time says when that
+  //    was.
+  //  * "数据 30 天前" answers "how old is the data" but not "how long have I been looking
+  //    at this copy", which is what a reader deciding whether to re-plan needs.
+  //
+  // So both times are shown, and the panel that says 「抓取时间与数据自身时间分别标注」
+  // is telling the truth.
   switch (source?.observed_at_basis) {
-    // The datum is produced by this very request against the live network, so "now" is
-    // a true statement about it.
+    // The datum was produced by this very request against the live network — at the
+    // moment we fetched it, which is the fact the reader needs to place it in time.
     case BASIS_LIVE_COMPUTED:
-      return "实时计算";
-    // The source stamped the datum, so its real age can be stated.
+      return `实时计算 · 抓取于 ${timeAgo(source?.fetched_at)}`;
+    // The source stamped the datum, so its real age can be stated alongside when we asked.
     case BASIS_PROVIDER_REPORTED:
-      return `数据 ${timeAgo(source?.observed_at)}`;
+      return `数据 ${timeAgo(source?.observed_at)} · 抓取于 ${timeAgo(source?.fetched_at)}`;
     // The source gave no observation time. Report when we fetched and say plainly that
     // the data's own time is unknown, rather than letting a fresh fetch imply fresh data.
     default:

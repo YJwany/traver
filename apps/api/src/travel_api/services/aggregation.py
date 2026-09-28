@@ -507,11 +507,19 @@ async def build_preview(
     typed_refs += [
         ("weather", ref) for result in weather_results for ref in result.source_references
     ]
+    # Holidays are paired even though ``MAX_AGE_SECONDS`` gives them no horizon, and the
+    # pairing is the point: ``FreshnessService`` distinguishes "no horizon, so nothing is
+    # claimed about this kind of fact" from "a horizon exists and the caller did not apply
+    # it", and only the first is acceptable. Leaving them out produced identical output
+    # today and would have silently swallowed the report the moment someone decided a
+    # holiday calendar does expire — which is why the test supplies such a policy.
+    typed_refs += [
+        ("holiday", ref) for result in holiday_results for ref in result.source_references
+    ]
     # Recomputed here rather than trusted from the provider, so the verdict is applied
     # by the current policy in one place instead of by whichever provider happened to
     # stamp the data.
     freshness = freshness_service or FreshnessService()
-    stale_facts = freshness.stale_facts(typed_refs)
 
     # The traveller's own notes are matched against the entities just aggregated, so a
     # pasted 小红书 note lands next to the place it is about instead of in a separate
@@ -525,9 +533,11 @@ async def build_preview(
     content_refs = [item.source_reference() for item in ingested]
     refs = [*refs, *content_refs]
     typed_refs += [("user_content", ref) for ref in content_refs]
-    # Judged again now that the notes are included: an undated note is reported as
-    # age-unknown, and a dated-but-old one as too old, without either being treated as
-    # current merely because the traveller supplied it.
+    # Judged once, after every reference that belongs to this plan has been added —
+    # including the traveller's notes. An undated note is reported as age-unknown and a
+    # dated-but-old one as too old, without either being treated as current merely because
+    # the traveller supplied it. Judging before the notes were added would have needed a
+    # second pass, and a second pass is how the earlier verdict gets silently dropped.
     stale_facts = freshness.stale_facts(typed_refs)
 
     provider_audit = (
