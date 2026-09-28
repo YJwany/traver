@@ -11,6 +11,7 @@ import { useJobProgress } from "../../../lib/use-job-progress";
 import { JobProgressPanel } from "../../components/job-progress";
 import { Disagreements } from "../../components/disagreements";
 import { AgeUnknownPanel } from "../../components/freshness-coverage";
+import { ExportPanel } from "../../components/export-panel";
 import { PACE_LABELS, TRAVEL_MODE_LABELS } from "../../components/plan-form";
 
 type AnyRecord = Record<string, any>;
@@ -256,6 +257,7 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
     <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><h2>景点 / attractions</h2><span className="muted">{trip.preview?.attractions?.length ?? 0} 个</span></div><div className="panel-body" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "0 20px" }}>{trip.preview?.attractions?.map((item: AnyRecord) => { const source = sourceFor(item); return <div className="entity-card" key={item.id}><div className="entity-title"><span>{item.canonical_name}</span><span>{item.ticket_price ? formatMoney(item.ticket_price.value) : ""}</span></div><div className="entity-meta">建议停留 {item.recommended_duration_minutes} 分钟 · {item.location?.address}</div>{item.description ? <div className="entity-meta entity-description">{item.description}{item.wikipedia_url ? <> <a href={item.wikipedia_url} target="_blank" rel="noreferrer noopener">维基百科</a></> : null}</div> : null}<Disagreements entity={item} /><SourceChip source={source} /></div>; })}</div></section>
     <section className="chat-history">{messages.filter((message) => message.role === "user" || message.role === "assistant").map((message) => <div className="chat-message" key={message.id}><strong>{message.role === "user" ? "你" : "AI"}</strong>{message.content}</div>)}</section>
     <section className="panel" style={{ marginTop: 18 }}><div className="panel-heading"><h2>修改历史 / versions</h2><span className="muted">{trip.change_history?.length ?? 0} 次</span></div><div className="panel-body">{trip.change_history?.length ? trip.change_history.slice().reverse().map((change: AnyRecord) => <div className="entity-card" key={change.id}><div className="entity-title"><span>Version {change.version} · {change.action}</span><span className="muted">{change.changed_at?.slice(0, 16).replace("T", " ")}</span></div><div className="entity-meta">原因：{change.reason} · 预算影响：{change.impact?.difference ?? "已重算"}</div></div>) : <div className="empty">还没有修改记录。自然语言修改会在这里留下版本。</div>}</div></section>
+    <ExportPanel trip={trip} />
     <AttributionFooter attributions={attributions} />
     <div className="chat-dock"><form className="chat-inner" onSubmit={submit}><textarea className="textarea chat-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder="例如：把酒店预算降到 1200 元，或者让第三天不要这么累。" disabled={busy} /><button className="button" type="submit" disabled={busy || !input.trim()}>{busy ? "正在重算…" : "发送 →"}</button></form></div>
   </main>;
