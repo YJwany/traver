@@ -132,6 +132,8 @@ python -m travel_api
 
 不止 `/trips`：**工具端点也要求凭据**。`POST /api/v1/tools/{name}` 曾经没有认证依赖，`?confirm_write=true` 只是确认而不是权限，而工具 handler 按对外发布的工具契约不收 owner，于是在仓储层以「不过滤」查行程——无凭据的调用方可以按 id 读到、并改掉别人的行程。现在它按工具自身的读/写类别校验作用域，并在调用期间绑定调用者属主；`GET /trips/{id}` 与经工具读同一个 id 会得到同一个答案。
 
+公开路由只有四条（`/health`、`/providers/attributions`、`/providers/health`、只返回工具定义的 `GET /tools`），每条都写明理由。这份名单不是靠人维护的测试清单：`tests/integration/test_route_protection.py` 从应用自己的 OpenAPI 文档里读出全部路由逐条以无凭据身份请求，只有被明确声明为公开的才允许不是 401——新增一条忘记带认证依赖的路由会被立刻抓住。
+
 `AUTH_ENABLED=false` 时的属主不是「没有」，而是 `AUTH_ANONYMOUS_OWNER`（默认 `local-dev`）：关闭认证意味着**谁都能访问**，不意味着数据没有归属。写出与读取必须用同一个答案，否则同一次请求里保存的东西下一次查不到。
 
 ```powershell
