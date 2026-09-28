@@ -432,6 +432,8 @@ profile——**正因为数据真的存在，这个错误特别像对的**。矩
 - `logging.basicConfig` 在 root 已有 handler 时会**静默失效**（pytest 等会先装 handler），导致文档中的日志格式可能根本没生效；现已用 `force=True` 使其确定生效
 - 本地建表存在两条并行路径（`AUTO_CREATE_SCHEMA` 与 Alembic）。已明确：本地可用前者，生产应设 `AUTO_CREATE_SCHEMA=false` 并只用 `alembic upgrade head`；`db/migrations/README.md` 此前称"迁移尚未添加"，与仓库中已存在的 3 个迁移矛盾，已按实际迁移链重写
 - **事实纪律修正**：OSM 的 `stars` 是酒店**星级分类**而非住客评分，此前却被写入 `Hotel.rating`，而 `decision_engine` 以 `(rating or 0) / 5` 计分，等于让"五星级分类"拿到满分、无评分酒店拿到 0 分。现 `rating` 一律为 `None`，星级记录在 `SourceReference.request_context["star_classification"]`
+- **同一模块里的第二个写死假设（本次）**：`score_hotel_offers` 把「方不方便」量成到 `(30.6574, 104.0817)`（成都春熙路）的距离，并偏好 `{"市中心", "锦江区"}` 两个区名——两者都是 `providers/mock.py` 夹具数据的属性。非成都行程因此 transit 恒为 0.0（一个零信息量却占 20% 权重的维度）、以及「距中心行程点约 1600000 米」这种看起来像测量结果的句子。**这个缺陷能活下来，是因为原来所有测试都用 `destination="成都"`**：夹具和断言共享同一个假设，用常量的同一个城市写的测试不可能失败。现在中心来自行程自己的点位（已定位景点与餐厅的质心、以及多数点所在的城区），无法测量的维度是 `None` 而非 `0.0`（`0.0` 读作「最差」而真值是「没测」），加权和按已测维度重新归一化。`tests/unit/test_hotel_scoring.py` 的 12 个测试全部使用非成都目的地，三个变异（写死中心、写死区名、`None` 改回 `0.0`）分别被 5 / 4 / 3 个测试抓住
+- **同类的占位值**：`RouteOptimizer.optimize` 的调用方在没有选中酒店时传 `(0.0, 0.0)`（几内亚湾），仅因三行之外的 `hotel_id is not None` 守卫才无害——一个看起来真实的值靠着别处的判断才安全。现传 `None`，并加测试钉住「有坐标无 id 时不得据此推算」与「`None` 与占位值行为必须一致」
 - **数值解析修正**：`_parse_decimal()` 会跳过前导符号，`-1` 被解析为 `1`（畸形星级变合法、负数金额变正数价格），末尾的 `amount >= 0` 因此是死代码；现已保留符号并拒绝负值
 
 随 Phase 4C 又发现并修掉三处：

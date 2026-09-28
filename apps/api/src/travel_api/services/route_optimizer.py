@@ -36,7 +36,7 @@ class RouteOptimizer:
         self,
         profile: TripProfile,
         hotel_id,
-        hotel_coordinates: tuple[float, float],
+        hotel_coordinates: tuple[float, float] | None,
         attractions: list[Attraction],
         restaurants: list[Restaurant],
         routes: list[RouteLeg],
@@ -59,6 +59,10 @@ class RouteOptimizer:
             cursor = datetime.combine(day_date, time(9, 30))
             sequence = 1
             last_entity_id = hotel_id
+            # Both the id and the coordinates, or neither. The id is what a routing leg is
+            # looked up by; the coordinates are what a distance estimate needs. Starting from
+            # coordinates alone would estimate travel from a place that is not in the
+            # itinerary, which is why this is not simply `hotel_coordinates`.
             last_coordinates = hotel_coordinates if hotel_id is not None else None
 
             for _ in range(attractions_per_day):

@@ -573,12 +573,18 @@ async def build_preview(
     itinerary = RouteOptimizer().optimize(
         profile,
         selected_hotel.id if selected_hotel else None,
+        # `None` rather than a placeholder coordinate. This used to pass `(0.0, 0.0)` — Null
+        # Island, in the Gulf of Guinea — which was harmless only because the optimizer guards
+        # on the hotel *id* before using the coordinates for anything. That made a real-looking
+        # value safe by the accident of a guard three functions away, so a future change to the
+        # guard would have started measuring every leg from the Gulf of Guinea with no
+        # indication anywhere that a placeholder had become real.
         (
             selected_hotel.location.coordinates.latitude,
             selected_hotel.location.coordinates.longitude,
         )
         if selected_hotel
-        else (0.0, 0.0),
+        else None,
         attractions,
         restaurants,
         routes,

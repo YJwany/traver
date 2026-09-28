@@ -127,3 +127,15 @@ measured durations: 20/20
 最后一条是原来那次「多报覆盖」缺陷所缺的东西——当时没有任何地方把声明和代码实际产出对起来看。
 
 `tests/integration/test_free_providers_live.py` 则要求在真实数据上：步行速度落在 2.5–6.5 km/h，且 `is_estimate` 必须与 `duration_is_measured` **一致**（两个方向都查）。只断言 `is_estimate is True` 会把驾车专用服务器的行为钉死，在真能测量步行的服务器上误报失败；只查速度则会让推算被当成实测。
+
+## 优化器起点：有 id 才有坐标
+
+`RouteOptimizer.optimize` 收 `hotel_id` 与 `hotel_coordinates` 两个参数，而优化器只在 `hotel_id is not None` 时才使用坐标——因为一条腿的起点必须**同时**是一个可查询路线的主体（按 id 找 leg）和一个可推算距离的点（按坐标算 haversine）。只有坐标没有 id，就会得到一个「从一个不在行程里的地方出发」的时长。
+
+调用方过去在没有选中酒店时传 `(0.0, 0.0)`：几内亚湾的 Null Island，离成都约 11000 公里。它当时无害，仅仅是因为三行之外那个 id 守卫——**一个看起来真实的值，靠着别处的判断才安全**。守卫哪天变了，每个没有酒店的行程的第一段路就会默默地从几内亚湾开始量，而界面上没有任何迹象表明一个占位值变成了真值。
+
+现在调用方传 `None`，类型是 `tuple[float, float] | None`，并由 `test_no_hotel_means_the_first_leg_is_not_measured_from_a_placeholder` 钉住两件事：给了坐标却没有 id 时不得据此推算距离；`None` 与占位值的行为必须一致（否则占位值是承重的）。变异验证：去掉那个 id 守卫，测试失败。
+
+## 打分用的「中心」也曾经是写死的
+
+`score_hotel_offers` 曾把「这家酒店方不方便」量成到 `(30.6574, 104.0817)`（成都春熙路）的距离，并偏好 `{"市中心", "锦江区"}` 这两个区名——两者都是 `providers/mock.py` 里夹具数据的属性。非成都的行程因此拿到 transit 恒为 0.0（一个没有信息量的维度，却占 20% 权重）、以及一句「距中心行程点约 1600000 米」。详见 `decision_engine.py` 的模块文档，以及 `tests/unit/test_hotel_scoring.py`——那 12 个测试**全部**使用非成都目的地，因为原来所有测试都用成都，而用常量的同一个城市写的断言不可能失败。

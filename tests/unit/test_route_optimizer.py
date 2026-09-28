@@ -242,3 +242,38 @@ def test_measured_route_legs_are_not_flagged_as_estimates():
     )
     assert itinerary.days[0].items[0].travel_from_previous_minutes == 27
     assert not any("distance-based" in conflict for conflict in itinerary.conflicts)
+
+
+def test_no_hotel_means_the_first_leg_is_not_measured_from_a_placeholder():
+    """``hotel_coordinates`` is optional, and passing coordinates without an id is refused.
+
+    The caller used to pass ``(0.0, 0.0)`` when there was no selected hotel — Null Island, in
+    the Gulf of Guinea. That was harmless only because the optimizer guards on the hotel *id*
+    before the coordinates are used for anything, so a real-looking value was made safe by a
+    guard several lines away. If that guard changed, every first leg of every hotel-less plan
+    would silently be measured from the Gulf of Guinea.
+
+    So the two tests below pin both halves: coordinates with no id must not produce a
+    distance-derived estimate, and an explicit ``None`` must be accepted.
+    """
+    attraction = _attraction(time(9), time(22))
+
+    # Coordinates given, but no hotel id: the optimizer must not use them. A leg derived from
+    # them would be a distance from a point that is not in the itinerary.
+    without_id = RouteOptimizer().optimize(_profile(), None, (0.0, 0.0), [attraction], [], [])
+    assert without_id.days, "the plan should still be built"
+    first = without_id.days[0].items[0]
+    # Null Island is ~11,000 km from 成都, so a distance-based leg would be enormous. The
+    # pace allowance for a relaxed trip is 20 minutes.
+    assert first.travel_from_previous_minutes <= 30, (
+        f"a leg of {first.travel_from_previous_minutes} minutes suggests the placeholder "
+        "coordinates were used as a real origin"
+    )
+
+    # And `None` is accepted, which is what the caller passes now.
+    with_none = RouteOptimizer().optimize(_profile(), None, None, [attraction], [], [])
+    assert with_none.days
+    assert (
+        with_none.days[0].items[0].travel_from_previous_minutes
+        == first.travel_from_previous_minutes
+    ), "None and a placeholder must not behave differently, or the placeholder is load-bearing"
