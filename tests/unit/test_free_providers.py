@@ -16,6 +16,7 @@ from travel_api.domain.models import (
     Attraction,
     DataDomain,
     Hotel,
+    Pace,
     Restaurant,
     RoutePoint,
     SourceType,
@@ -1102,6 +1103,45 @@ async def test_the_provider_serves_every_aspect_it_claims_to():
     assert "walking" not in unserved
     walked = await routing.calculate_routes(make_profile(pace=Pace.RELAXED), points)
     assert walked.data, "walking is claimed as served but produced no legs"
+    await http.aclose()
+
+
+async def test_a_transit_request_makes_no_http_call_at_all():
+    """Declining has to be a decision, not a failed request.
+
+    The mode table check above proves ``serves_mode`` reports no transit profile. This
+    proves the request never leaves the process: querying a car-only server and discarding
+    the answer would waste a real request, and on the demo server it would return HTTP 200
+    with byte-identical car numbers — one code path away from labelling a 7-minute drive
+    as a bus ride.
+    """
+    from uuid import uuid4
+
+    seen: list[str] = []
+    base = _handler()
+
+    def counting_handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return base(request)
+
+    http = FreeHttpClient(
+        user_agent="TraverTest/1.0", **NO_RETRY, transport=httpx.MockTransport(counting_handler)
+    )
+    routing = OsmRoutingProvider(http=http, base_url=FOSSGIS_OSRM)
+    points = [
+        RoutePoint(id=uuid4(), latitude=30.6558, longitude=104.0805),
+        RoutePoint(id=uuid4(), latitude=30.6495, longitude=104.0432),
+    ]
+    profile = make_profile(pace=Pace.BALANCED)
+    profile.travel_mode = TravelMode.TRANSIT
+
+    result = await routing.calculate_routes(profile, points)
+
+    assert result.data == [], "a transit request must not be answered with car data"
+    assert result.source_references == [], (
+        "and it must not stamp a source reference either, which would claim a fetch happened"
+    )
+    assert seen == [], "declining must not cost a request"
     await http.aclose()
 
 

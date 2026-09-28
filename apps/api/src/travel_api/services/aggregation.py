@@ -6,20 +6,24 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from travel_api.domain.models import (
+    TRAVEL_MODE_LABELS,
     Attraction,
     BudgetStrategyName,
     HolidayCalendar,
     Hotel,
     HotelOffer,
+    Itinerary,
     Pace,
     ProviderHealth,
     ProviderResult,
     Restaurant,
     RoutePoint,
+    TravelMode,
     TripPreview,
     TripProfile,
     WeatherForecast,
 )
+from travel_api.providers.base import resolve_travel_mode
 from travel_api.providers.registry import ProviderRegistry
 from travel_api.services.budget_engine import BudgetEngine
 from travel_api.services.decision_engine import score_hotel_offers
@@ -223,6 +227,55 @@ def _collect(results: list[ProviderResult], expected_type: type) -> list:
     return [item for result in results for item in result.data if isinstance(item, expected_type)]
 
 
+#: What would actually close the gap, per mode. A single generic sentence is not
+#: actionable: telling someone who asked to walk that 公交/地铁 needs a 高德 key points them
+#: at the wrong remedy, and the free routing tier already covers walking and driving.
+_TRAVEL_MODE_REMEDIES: dict[str, str] = {
+    TravelMode.WALK.value: "免费路线源（OSRM）的步行 profile 可以算，通常是网络或限流问题",
+    TravelMode.DRIVE.value: "免费路线源（OSRM）的驾车 profile 可以算，通常是网络或限流问题",
+    TravelMode.TAXI.value: "免费路线源（OSRM）的驾车 profile 可以算，通常是网络或限流问题",
+    TravelMode.TRANSIT.value: "接入高德 Web 服务 Key（公交/地铁是免费源完全没有的能力）",
+}
+
+
+def _disclose_unserved_travel_mode(
+    itinerary: Itinerary, profile: TripProfile, routes: list
+) -> None:
+    """Say when the mode the traveller asked for is not what the plan was built on.
+
+    Choosing 公交 / 地铁 without a 高德 key is a supported, non-failing path: the free routers
+    decline transit rather than substituting a car time, and the itinerary's travel times
+    become distance-based estimates. Those estimates are disclosed — but only as a count
+    ("N leg(s) use distance-based travel estimates"), which does not connect them to the
+    request that caused them. A traveller who explicitly picked 公交 / 地铁 sees estimated
+    minutes and no explanation, and the most likely reading is that the numbers are
+    measured.
+
+    So the reason is attached to the consequence, in the same shape the capability matrix
+    uses for a gap: what was asked, what happened, and what would change it. The remedy is
+    per-mode because a wrong remedy is worse than none — it sends someone to configure a
+    credential that would not have helped.
+
+    Only fires for an *explicit* request. A pace-derived mode is the planner's own default,
+    not something that went unserved, and the generic estimate disclosure already covers
+    it; warning there would put a caveat on the default zero-configuration plan, which is
+    the one path that should read as complete.
+    """
+    if profile.travel_mode is None:
+        return
+    if routes:
+        return
+
+    mode = resolve_travel_mode(profile)
+    label = TRAVEL_MODE_LABELS.get(mode.value, mode.value)
+    remedy = _TRAVEL_MODE_REMEDIES.get(mode.value, "接入一个支持该方式的来源")
+    itinerary.conflicts.append(
+        f"你要求按「{label}」规划，但没有可用的数据源能算这种路线，"
+        f"因此本行程的路程时间是按距离估算的，不是实测结果。"
+        f"{remedy}之后，这些时间会变成实测值。"
+    )
+
+
 def _build_route_points(
     selected_hotel: Hotel | None,
     attractions: list[Attraction],
@@ -411,6 +464,7 @@ async def build_preview(
         restaurants,
         routes,
     )
+    _disclose_unserved_travel_mode(itinerary, profile, routes)
     weather = next(iter(_collect(weather_results, WeatherForecast)), None)
     holidays = next(iter(_collect(holiday_results, HolidayCalendar)), None)
     await reporter.finish_step()

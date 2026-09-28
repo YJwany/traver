@@ -41,6 +41,17 @@ class TravelMode(StrEnum):
     DRIVE = "drive"
 
 
+#: Chinese wording for each mode, for prose the server itself writes (a plan's warnings,
+#: for example). Kept beside the enum so adding a member without deciding how to name it
+#: is a visible omission rather than an English identifier leaking into a Chinese sentence.
+TRAVEL_MODE_LABELS: dict[str, str] = {
+    TravelMode.WALK.value: "步行",
+    TravelMode.TRANSIT.value: "公交 / 地铁",
+    TravelMode.TAXI.value: "打车",
+    TravelMode.DRIVE.value: "驾车",
+}
+
+
 class PriceType(StrEnum):
     PER_NIGHT = "per_night"
     PER_STAY = "per_stay"
@@ -429,6 +440,18 @@ class TripProfile(BaseModel):
     attraction_budget: Decimal | None = Field(default=None, ge=0)
     preferences: list[str] = Field(default_factory=list)
     pace: Pace = Pace.BALANCED
+    #: How the traveller wants to move between places once they are there.
+    #:
+    #: ``None`` means "derive it from the pace", which is what every trip did before this
+    #: field existed — so leaving it unset changes nothing. It is a separate field rather
+    #: than a fourth ``Pace`` because the two answer different questions: pace says how
+    #: much to pack into a day, this says how to get between the things packed in.
+    #:
+    #: Without it, 公交/地铁 was unimplementable-in-practice: ``TravelMode.TRANSIT`` was a
+    #: real enum member with a complete provider implementation behind it and no way for
+    #: any request to select it, so the capability the Amap integration exists to add
+    #: could never appear in an itinerary.
+    travel_mode: TravelMode | None = None
     hotel_preferences: list[str] = Field(default_factory=list)
     food_preferences: list[str] = Field(default_factory=list)
     attraction_preferences: list[str] = Field(default_factory=list)
@@ -558,6 +581,11 @@ class TripPatchRequest(BaseModel):
     attraction_budget: Decimal | None = Field(default=None, ge=0)
     preferences: list[str] | None = None
     pace: Pace | None = None
+    #: ``None`` means "leave unchanged", so this cannot be used to clear an explicit mode
+    #: back to pace-derived — the same limitation ``pace`` already has. Clearing would
+    #: need a sentinel distinct from both ``None`` and a member, and inventing one for
+    #: this field alone would make the patch semantics inconsistent.
+    travel_mode: TravelMode | None = None
     hotel_preferences: list[str] | None = None
     food_preferences: list[str] | None = None
     attraction_preferences: list[str] | None = None

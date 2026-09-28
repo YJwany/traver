@@ -196,12 +196,63 @@ results[] { origin_id, dest_id, distance, duration }
 | 能力 | 免费源 | 高德 |
 | --- | --- | --- |
 | 驾车 / 步行 / 骑行路线 | OSRM（仅驾车 profile，步行耗时靠推导） | 有，且国内路网更准 |
-| **公交 / 地铁** | **完全没有** | **有（v5 transit）** |
+| **公交 / 地铁** | **完全没有** | **有（v5 transit），但必须在行程里显式选择** |
 | POI / 景点 / 餐饮 | Overpass（OSM tag 体系） | 有，国内覆盖显著更全 |
 | 天气 | Open-Meteo | 有（adcode 维度） |
 | 酒店**房价** | 无 | **也没有**——高德只提供酒店 POI，不提供房价 |
 
 最后一行是刻意写明的：高德的 `search_hotels` 能力指的是**找到酒店**，不是**给出房价**。因此清单里高德不声明 `search_room_offers`，避免用「能找到酒店」暗示「有实时房价」。
+
+## 公交/地铁：实现了不等于能用
+
+「公交/地铁是 OSRM 完全没有的能力，这是接入高德的主要理由」——这句话在清单里挂了很久，但**当时它做不到**。
+
+原因是选路逻辑只有一个入口：
+
+```python
+mode_for_pace(pace) -> TravelMode.WALK if pace in (RELAXED, BALANCED) else TravelMode.DRIVE
+```
+
+`Pace` 只有 `relaxed`/`balanced`/`full` 三个成员，所以这个函数**永远返回不了 `TravelMode.TRANSIT`**。而 `_transit_legs` 只能由 `calculate_routes` 里那一个 `if mode is TravelMode.TRANSIT` 分支调用。于是：
+
+- `_transit_legs` 有完整实现、有端点、有针对固定报文的测试；
+- capability 矩阵在配置了 Key 时如实报告 `transit: covered`；
+- 而**没有任何一次请求能产生一条公交/地铁腿**。
+
+这是「实现了方法 ≠ 服务了该能力」最纯粹的形态：所有单元测试都通过，因为每个部件都正确，缺的是把它们连起来的那根线。
+
+修法是让出行方式可以被**要求**，而不是只能从节奏推导：
+
+- `TripProfile.travel_mode: TravelMode | None = None`。`None` 表示「按节奏推导」，也就是这个字段存在之前所有行程的行为，所以不设置它不改变任何东西；
+- `resolve_travel_mode(profile)` 放在 `providers/base.py`，两个 provider 共用。放在共享位置是有原因的：注册表对同一次聚合会同时调用两个 provider，如果它们对方式判断不一致，两边的腿会基于不同假设计算却被合并进同一份行程，而载荷里没有任何东西能对账；
+- `mode_for_pace` 保留为 `resolve_travel_mode` 的兜底分支，并且有一条测试专门钉住「它永远返回不了 transit」这个事实，防止将来有人再直接调用它而让能力重新变成死的。
+
+接口层：`/trips` 建单与 `PATCH` 都接受该字段；网页表单多了一个「城际交通」选择器（跟着节奏走 / 公交地铁 / 步行 / 驾车 / 打车）。选「公交/地铁」而没有高德 Key 时不会报错——OSRM 会**拒绝**而不是拿驾车数据顶替，路程由规划器估算并标注为估算，矩阵里也一直是「缺失」。
+
+而「估算」这个披露**不足以说明原因**。它是行程级的一条计数（`7 leg(s) use distance-based travel estimates`），没有把结果和造成它的那个请求连起来；一个明确选了「公交/地铁」的人看到估算的分钟数，最自然的理解就是这些数字是实测的。所以 `_disclose_unserved_travel_mode()` 把原因接到结果上，形状与能力矩阵的缺口说明一致——**你要什么、实际发生了什么、怎样才会变**：
+
+> 你要求按「公交 / 地铁」规划，但没有可用的数据源能算这种路线，因此本行程的路程时间是按距离估算的，不是实测结果。接入高德 Web 服务 Key（公交/地铁是免费源完全没有的能力）之后，这些时间会变成实测值。
+
+三个约束写进了测试：
+
+1. **只在显式请求时出现。** 由节奏推导出的方式（`travel_mode is None`）是规划器自己的默认选择，不是「没被服务」，而且「N 段按距离估算」那条已经覆盖了它；在那里加警告等于给零配置的默认路径平白加一条免责声明。
+2. **补救办法按方式区分。** 错的补救比没有补救更糟——它让人去配一个根本不会起作用的凭据。告诉一个要求「步行」的人「公交/地铁需要高德 Key」就是这种错误：免费路线源本来就有真实步行 profile。
+3. **命名来自枚举旁边的 `TRAVEL_MODE_LABELS`。** 有一条测试对 `TravelMode` 全体断言每个成员都有中文名，所以将来加成员却忘了起名会在测试里失败，而不是让 `travel_mode: bus` 这种标识符混进中文句子。
+
+`tests/unit/test_travel_mode_disclosure.py` 钉住以上三点，并覆盖「被服务时不出现」与「不覆盖行程已有的其他结论」两个方向。
+
+`tests/unit/test_amap_routes.py` 里有一个回归测试 `test_a_transit_request_actually_queries_the_transit_endpoint`，断言请求打到 `/v5/direction/transit/integrated` 且**没有**打到 `/v3/distance`——后者正是「用驾车时长冒充公交」的失败形态。
+
+## 路线点数预算与「只算了一部分」
+
+`AMAP_MAX_ROUTE_POINTS`（默认 25，可配置）决定一次行程里高德会为多少个地点算路线。超出预算的地点，其路程由规划器估算。
+
+两点要交代清楚：
+
+1. **预算是用户的成本决定，所以可配。** 免费个人配额是月调用量，每个超出矩阵扫掠的点都多一次请求。默认值刻意与免费 OSRM provider 的预算一致，这样「填了 Key」永远不会让**能被计算的路段变少**——否则接入高德反而退化，而用户不会知道。
+2. **被截断时要如实说出来。** source reference 里同时记录 `points_offered`、`points_routed`、`point_budget` 与 `truncated`，并在 `note` 里写成一句人话（「本次只对 N 个地点计算了路线（共提供 M 个）」）。只有 `point_count` 一个数字时，客户端会把 5 个点当成整趟行程的规模；而带 `truncated` 的载荷让「这段是实测的」和「这段是估算的」不再长得一样。
+
+`/v3/distance` 每次请求最多 100 个 origin（高德文档）。这是**协议属性而非偏好**，所以它是 `providers/amap/routing.py` 里的常量 `AMAP_MAX_MATRIX_ORIGINS`，并且**结构性钳制** `max_points` ——和 OSRM provider 钳制自己的坐标上限是同一个做法。做成设置项反而有害：把它调高会发出高德必然拒绝的请求，一次扫掠的所有路段一起丢失。
 
 ## 三个 Provider，三个注册名
 
@@ -209,7 +260,7 @@ results[] { origin_id, dest_id, distance, duration }
 
 | 注册名 | 能力 |
 |---|---|
-| `amap-routing` | `calculate_routes`（驾车 / 公交地铁 / 步行） |
+| `amap-routing` | `calculate_routes`（驾车 / 公交地铁 / 步行；公交地铁需在行程里显式选择 `travel_mode`） |
 | `amap-places` | `search_hotels`、`search_restaurants`、`search_attractions` |
 | `amap-weather` | `search_weather` |
 

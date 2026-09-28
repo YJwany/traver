@@ -37,6 +37,7 @@ export type PlanFormValues = {
   travelers: number;
   total_budget: number | null;
   pace: string;
+  travel_mode: string;
   interests: string;
 };
 
@@ -47,14 +48,59 @@ const EMPTY: PlanFormValues = {
   travelers: 2,
   total_budget: null,
   pace: "balanced",
+  travel_mode: "",
   interests: "",
 };
 
-const PACES = [
+/**
+ * The three paces the API accepts: relaxed / balanced / full.
+ *
+ * These `value` strings are the wire format, not a display vocabulary. The third one
+ * previously read "packed", which is not a member of the API's `Pace` enum, so choosing
+ * 紧凑 returned HTTP 422 and no trip at all. A label is free to differ from the value;
+ * the value is not free to differ from the API. `tests/unit/test_web_api_contract.py`
+ * compares this list against the enum, because nothing else can see both sides.
+ */
+export const PACES = [
   { value: "relaxed", label: "轻松", hint: "每天 2 个点左右" },
   { value: "balanced", label: "适中", hint: "每天 3 个点左右" },
-  { value: "packed", label: "紧凑", hint: "尽量多走" },
+  { value: "full", label: "紧凑", hint: "尽量多走" },
 ];
+
+/** Human wording for a stored pace. All three, so 紧凑 is not shown as 平衡. */
+export const PACE_LABELS: Record<string, string> = {
+  relaxed: "轻松节奏",
+  balanced: "适中节奏",
+  full: "紧凑节奏",
+};
+
+/**
+ * How to move between places, or "let the pace decide".
+ *
+ * The empty value is not a fourth mode: it means "derive it from the pace", which is what
+ * every trip did before this could be chosen. The submit handler omits the field entirely
+ * in that case rather than sending null, so the API's own default decides.
+ *
+ * 公交 / 地铁 is listed first among the real modes because it is the one that needs a 高德
+ * key — the same key whose absence the capability matrix already reports. Selecting it
+ * without one produces estimated travel times rather than a refused plan, and those
+ * estimates are labelled as estimates.
+ */
+export const TRAVEL_MODES = [
+  { value: "", label: "跟着节奏走", hint: "由节奏决定步行或驾车" },
+  { value: "transit", label: "公交 / 地铁", hint: "需要高德 Key，否则只能估算" },
+  { value: "walk", label: "步行", hint: "按真实步行路网计算" },
+  { value: "drive", label: "驾车", hint: "按真实道路计算" },
+  { value: "taxi", label: "打车", hint: "按驾车路线加打车估价" },
+];
+
+/** Human wording for a stored travel mode, for the trip header. */
+export const TRAVEL_MODE_LABELS: Record<string, string> = {
+  transit: "公交 / 地铁",
+  walk: "步行",
+  drive: "驾车",
+  taxi: "打车",
+};
 
 export function PlanForm({ apiUrl }: { apiUrl: string }) {
   const [values, setValues] = useState<PlanFormValues>(EMPTY);
@@ -84,6 +130,11 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
       travelers: values.travelers,
       pace: values.pace,
     };
+    // Omitted rather than sent as null when unset: the field means "derive it from the
+    // pace", and the API's own default is what should decide that, not this form.
+    if (values.travel_mode) {
+      profile.travel_mode = values.travel_mode;
+    }
     if (values.total_budget !== null && values.total_budget > 0) {
       profile.total_budget = values.total_budget;
     }
@@ -193,6 +244,22 @@ export function PlanForm({ apiUrl }: { apiUrl: string }) {
                     aria-pressed={values.pace === pace.value}
                   >
                     {pace.label} · {pace.hint}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="credential-row" style={{ marginTop: 10 }}>
+              <span>城际交通</span>
+              <div className="example-row">
+                {TRAVEL_MODES.map((mode) => (
+                  <button
+                    key={mode.value || "auto"}
+                    type="button"
+                    className={`example ${values.travel_mode === mode.value ? "example-active" : ""}`}
+                    onClick={() => update("travel_mode", mode.value)}
+                    aria-pressed={values.travel_mode === mode.value}
+                  >
+                    {mode.label} · {mode.hint}
                   </button>
                 ))}
               </div>

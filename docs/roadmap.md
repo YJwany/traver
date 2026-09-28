@@ -245,6 +245,44 @@
   这既让调用方立刻得到答案，也让作业列表不能被用来探测行程 id 是否存在
 - 同步端点保留：接入作业是更好的默认，不是唯一选项，删掉它只会破坏调用方而换不到任何诚实性
 
+**已完成的第 5 步之一：让「接入高德的理由」真的能用**
+
+设计细节见 [`docs/architecture/amap-contract.md`](architecture/amap-contract.md)。要点：
+
+- 清单里写着「公交/地铁是 OSRM 完全没有的能力，这是接入它的主要理由」，挂了很久，而**它做不到**：
+  选路只有一个入口 `mode_for_pace(pace)`，而 `Pace` 只有 relaxed/balanced/full 三个成员，
+  所以它永远返回不了 `TravelMode.TRANSIT`；`_transit_legs` 只能由那一个 `if mode is TRANSIT`
+  分支调用。于是实现完整、端点正确、单元测试全过，而**没有任何一次请求能产生一条公交/地铁腿**
+- 这是「实现了方法 ≠ 服务了该能力」最纯粹的形态：每个部件都对，缺的是把它们连起来的那根线，
+  所以没有任何单元测试能看见它。能力矩阵在配了 Key 时如实报 `transit: covered`，于是整条链上
+  唯一的错误信息来自用户——他填了 Key，却发现公交地铁永远不会出现
+- 修法是让出行方式可以被要求：新增 `TripProfile.travel_mode`（`None` = 按节奏推导，即所有旧行程的行为），
+  `resolve_travel_mode()` 放在 `providers/base.py` 由两个 provider 共用——注册表对同一次聚合同时调用
+  两者，判断不一致会让两边的腿基于不同假设却被合并，而载荷里没有东西能对账
+- `mode_for_pace` 保留为兜底分支，并有测试专门钉住「它永远返回不了 transit」，防止将来有人直接调用它
+  让能力重新变死
+- 同一批还修掉两个「按钮是坏的」缺陷：网页表单的「紧凑」发的是 `packed`，而 API 的 `Pace` 枚举是
+  `full`，所以点它得到 **HTTP 422** 而不是行程；行程页也只会把 `relaxed` 显示成「轻松节奏」、
+  其余一律显示「平衡节奏」，「紧凑」看不出来
+- `packed` 这类错误没有任何测试能发现：网页测试对着表单自己的列表断言会通过，Python 测试对着枚举
+  断言也会通过，缺陷正好住在两者之间，而两种语言没有共享常量的机制。所以新增
+  `tests/unit/test_web_api_contract.py`——用 `.env.example` 那套办法解析 TypeScript 里的取值，
+  与枚举比对，**并把表单自己的每个取值真的 POST 到端点**（词汇表对得上，仍可能在请求层被拒）
+- 4 个变异全部被抓住（`scripts/mutate_web_api_contract.py`），包括最初那个 `packed`
+- 顺带把 `AMAP_MAX_MATRIX_ORIGINS`（声明了但从未被读取的死设置）换成真正生效的
+  `AMAP_MAX_ROUTE_POINTS`（默认 25，与 OSRM 预算一致，使「填了 Key」不会让可计算路段变少），
+  并把 `/v3/distance` 每次 100 个 origin 的**协议上限**做成结构性钳制的常量而非偏好开关
+- 被截断的路线现在如实交代：source reference 同时记录 `points_offered` / `points_routed` /
+  `point_budget` / `truncated`，`note` 里也写成一句人话。只有一个 `point_count` 时，客户端会把
+  「算了 5 个点」当成「这趟行程就 5 个点」
+- 选「公交/地铁」而没有 Key 时，行程里会明确写出**为什么**是估算（`_disclose_unserved_travel_mode`）：
+  原来只有一条行程级计数「N 段按距离估算」，它没有把结果和造成它的请求连起来，使用者最自然的
+  理解仍然是那些分钟数是实测的。补救办法按方式区分——告诉一个要求「步行」的人「公交地铁需要高德
+  Key」是错的补救，而错的补救比没有补救更糟，它会让人去配一个不起作用的凭据
+- 真实端到端验证（零密钥、真实免费源、`travel_mode=transit`）：路段 0 条、无任何来源声称测过
+  公交路线、行程仍可规划、矩阵报 `transit: covered=False`，并且行程里确实带着上面那条解释
+  （`scripts/probe_transit_without_key.py`）
+
 **已完成的多源交叉验证**
 
 设计细节见 [`docs/architecture/cross-source-validation.md`](architecture/cross-source-validation.md)。要点：

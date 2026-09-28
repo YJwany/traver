@@ -79,6 +79,7 @@ def build_amap_providers(
     base_url: str = DEFAULT_AMAP_BASE_URL,
     timeout_seconds: float = 30.0,
     ttl_seconds: int = 300,
+    max_route_points: int = 25,
 ) -> list[Any]:
     """Build the AMap-backed providers for one owner's key.
 
@@ -109,7 +110,12 @@ def build_amap_providers(
     geocoder = AmapGeocoder(client, name=AMAP_PLACE_PROVIDER_NAME)
 
     return [
-        AmapRoutingProvider(client, name=AMAP_ROUTING_PROVIDER_NAME, ttl_seconds=ttl_seconds),
+        AmapRoutingProvider(
+            client,
+            name=AMAP_ROUTING_PROVIDER_NAME,
+            ttl_seconds=ttl_seconds,
+            max_points=max_route_points,
+        ),
         AmapPlaceProvider(
             client,
             name=AMAP_PLACE_PROVIDER_NAME,

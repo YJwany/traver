@@ -110,8 +110,18 @@ class Settings(BaseSettings):
     #: genuinely current rather than "current as of whenever we last looked" — and
     #: the ToS reason and the freshness reason point the same way.
     amap_ttl_seconds: int = 300
-    #: AMap's distance-matrix endpoint accepts at most 100 origins per request.
-    amap_max_matrix_origins: int = 100
+    #: How many places AMap will route per trip. Each point beyond the distance sweep
+    #: costs an extra request and the free personal quota is a monthly call count, so
+    #: this is a real cost decision — and it belongs to whoever owns the key, which is
+    #: why it is configurable rather than hardcoded. The default matches the OSRM
+    #: provider's budget so that supplying a key never *reduces* the share of the
+    #: itinerary that gets a measured route. The planner assembles up to
+    #: ``MAX_ROUTE_POINTS`` (40) points; anything beyond this budget has its legs
+    #: estimated, and the route's source reference reports that as ``truncated``.
+    #:
+    #: Clamped by ``AMAP_MAX_MATRIX_ORIGINS`` (100, AMap's documented per-request
+    #: origin limit) because that is a property of the protocol, not a preference.
+    amap_max_route_points: int = 25
     #: Requests per second allowed against the AMap host. The free personal quota
     #: is a monthly call count, not a rate, but a limiter keeps a burst from
     #: tripping the per-second guard AMap also enforces.

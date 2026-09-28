@@ -306,6 +306,7 @@ def create_app(
                     base_url=app_settings.amap_base_url,
                     timeout_seconds=app_settings.free_provider_timeout_seconds,
                     ttl_seconds=app_settings.amap_ttl_seconds,
+                    max_route_points=app_settings.amap_max_route_points,
                 )
             except AmapKeyError:
                 # A stored value that is blank or whitespace. Treated as "not

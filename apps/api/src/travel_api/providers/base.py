@@ -4,11 +4,37 @@ from typing import Protocol, runtime_checkable
 
 from travel_api.domain.models import (
     Attraction,
+    Pace,
     ProviderHealth,
     ProviderResult,
     RoutePoint,
+    TravelMode,
     TripProfile,
 )
+
+
+def resolve_travel_mode(profile: TripProfile) -> TravelMode:
+    """Which mode a routing provider should answer for this trip.
+
+    An explicit ``travel_mode`` wins. Otherwise it is derived from the pace, which keeps
+    every trip planned before the field existed on exactly the route it had.
+
+    This lives here rather than in each provider because the two providers must agree:
+    the registry calls both for one aggregation, and if they disagreed about the mode the
+    resulting legs would be measured against different assumptions while being merged into
+    one itinerary. Deriving it in two places previously meant each could drift, and only
+    one of them could ever produce a 公交/地铁 leg — so a request for transit would have
+    silently returned driving distances from the other source.
+
+    A mode no provider can serve is not an error here. Providers decline it themselves
+    (see ``OSRM_PROFILE_BY_MODE``, which has no transit entry), the capability matrix
+    already reports the gap, and the planner falls back to labelled estimates — which is
+    the honest outcome rather than a refusal to plan the trip at all.
+    """
+    if profile.travel_mode is not None:
+        return profile.travel_mode
+    return TravelMode.WALK if profile.pace in (Pace.RELAXED, Pace.BALANCED) else TravelMode.DRIVE
+
 
 # Capability protocols.
 #

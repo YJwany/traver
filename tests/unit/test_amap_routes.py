@@ -23,11 +23,13 @@ import pytest
 from travel_api.domain.models import Pace, RoutePoint, TravelMode, TripProfile
 from travel_api.providers.amap.client import AmapClient
 from travel_api.providers.amap.routing import (
+    AMAP_MAX_MATRIX_ORIGINS,
     DIRECTION_PATH_BY_MODE,
     DISTANCE_TYPE_BY_MODE,
     AmapRoutingProvider,
     mode_for_pace,
 )
+from travel_api.providers.base import resolve_travel_mode
 
 
 def _point(latitude: float, longitude: float) -> RoutePoint:
@@ -40,6 +42,16 @@ def _profile(pace: Pace = Pace.BALANCED) -> TripProfile:
         start_date=date(2025, 5, 1),
         end_date=date(2025, 5, 3),
         pace=pace,
+    )
+
+
+def _transit_profile() -> TripProfile:
+    return TripProfile(
+        destination="北京",
+        start_date=date(2025, 5, 1),
+        end_date=date(2025, 5, 3),
+        pace=Pace.BALANCED,
+        travel_mode=TravelMode.TRANSIT,
     )
 
 
@@ -87,6 +99,106 @@ def test_mode_follows_pace_like_the_osrm_provider(pace, expected):
     """Kept identical to OSRM so that plugging in AMap changes *quality*, not which
     journeys the plan is built around."""
     assert mode_for_pace(pace) == expected
+
+
+# -- an explicit travel mode, and why 公交/地铁 needed one ------------------
+#
+# ``TravelMode.TRANSIT`` had a complete implementation behind it — a working
+# ``_transit_legs``, an endpoint, tests against canned payloads — and no way for any
+# request to reach it, because the only selector was ``mode_for_pace`` and it can return
+# only WALK or DRIVE. The manifest meanwhile advertised 公交/地铁 as *the* reason to
+# supply a 高德 key. So the headline differentiator of the whole integration was inert,
+# which is the "implementing a method is not serving it" failure in its purest form: the
+# capability matrix said covered, and no itinerary could ever contain a transit leg.
+
+
+def test_an_explicit_transit_request_reaches_the_transit_path():
+    """The regression that mattered: transit must be selectable, not merely implemented."""
+    assert resolve_travel_mode(_transit_profile()) is TravelMode.TRANSIT
+
+
+def test_an_explicit_mode_overrides_the_pace_derived_one():
+    """A relaxed pace would otherwise pick walking and quietly ignore the request."""
+    profile = TripProfile(
+        destination="北京",
+        start_date=date(2025, 5, 1),
+        end_date=date(2025, 5, 3),
+        pace=Pace.RELAXED,  # would derive WALK
+        travel_mode=TravelMode.DRIVE,
+    )
+    assert resolve_travel_mode(profile) is TravelMode.DRIVE
+    assert mode_for_pace(profile.pace) is TravelMode.WALK
+
+
+def test_leaving_the_mode_unset_changes_nothing():
+    """Every trip planned before this field existed must keep the route it had."""
+    for pace in Pace:
+        assert resolve_travel_mode(_profile(pace)) is mode_for_pace(pace)
+
+
+@pytest.mark.asyncio
+async def test_a_transit_request_actually_queries_the_transit_endpoint():
+    """Selecting the mode is not enough; it has to reach the right endpoint."""
+    provider, http = _provider({"/v5/direction/transit/integrated": TRANSIT_PAYLOAD})
+    points = [_point(39.90 + index * 0.01, 116.40) for index in range(3)]
+
+    result = await provider.calculate_routes(_transit_profile(), points)
+
+    assert http.calls, "a transit request must actually call 高德"
+    assert all(path == "/v5/direction/transit/integrated" for path, _ in http.calls)
+    assert result.source_references[0].request_context["travel_mode"] == "transit"
+    assert all(leg.mode is TravelMode.TRANSIT for leg in result.data)
+    # And it must not have been answered with a car matrix, which is the failure mode
+    # this replaced: a plausible duration for the wrong vehicle.
+    assert not any(path == "/v3/distance" for path, _ in http.calls)
+
+
+def test_the_pace_alone_can_never_select_transit():
+    """The structural reason 公交/地铁 was dead, pinned so it cannot come back.
+
+    The trap is subtle: ``mode_for_pace`` looks like a complete mode selector, and it is
+    reachable, correct and tested — it simply cannot express transit. Any future caller
+    that uses it directly instead of ``resolve_travel_mode`` silently makes the headline
+    capability unreachable again, and every test of ``_transit_legs`` would still pass.
+    """
+    assert set(Pace) == {Pace.RELAXED, Pace.BALANCED, Pace.FULL}
+    derived = {mode_for_pace(pace) for pace in Pace}
+    assert TravelMode.TRANSIT not in derived
+    # So the only way transit is reachable is through the explicit field.
+    assert resolve_travel_mode(_transit_profile()) is TravelMode.TRANSIT
+
+
+def test_transit_coverage_is_stated_as_consecutive_pairs():
+    """Transit is one request per pair, so it cannot cover the full matrix.
+
+    Claiming otherwise would present a partially routed plan as fully routed.
+    """
+    provider, _ = _provider()
+    reference = provider._source_reference(
+        mode=TravelMode.TRANSIT, point_count=3, destination="北京"
+    )
+    assert reference.request_context["coverage"] == "consecutive_pairs"
+
+
+def test_the_two_providers_agree_on_the_mode_for_one_profile():
+    """They are called for the same aggregation and their legs are merged.
+
+    If they disagreed, one source's measured legs would be computed against a different
+    assumption than the other's and nothing in the payload would reconcile them.
+    """
+    from travel_api.providers.free.osrm import mode_for_pace as osrm_mode_for_pace
+
+    for pace in Pace:
+        assert mode_for_pace(pace) is osrm_mode_for_pace(pace)
+
+    for mode in (TravelMode.WALK, TravelMode.DRIVE, TravelMode.TAXI, TravelMode.TRANSIT):
+        profile = TripProfile(
+            destination="北京",
+            start_date=date(2025, 5, 1),
+            end_date=date(2025, 5, 3),
+            travel_mode=mode,
+        )
+        assert resolve_travel_mode(profile) is mode
 
 
 # -- the distance sweep (driving) -----------------------------------------
@@ -518,3 +630,96 @@ async def test_health_does_not_spend_a_quota_call():
     assert http.calls == []
     assert health.status == "ok"
     assert health.provider == "amap"
+
+
+# -- the point budget, and disclosing that it was applied ------------------
+#
+# `max_points` is a real budget: the free quota is a monthly call count, so routing every
+# place a trip mentions is not free. What matters for honesty is not the size of the
+# budget but whether a reader can tell it was applied — otherwise "this leg is measured"
+# and "this leg is one of the twelve we got to" look identical.
+
+
+def _counting_sweep(params):
+    count = len(params["origins"].split("|"))
+    return {
+        "status": "1",
+        "results": [
+            {"origin_id": str(index), "distance": "100", "duration": "60"}
+            for index in range(1, count + 1)
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_full_coverage_route_reports_that_nothing_was_dropped():
+    provider, _ = _provider({"/v3/distance": _counting_sweep}, max_points=5)
+    points = [_point(39.90 + index * 0.01, 116.40) for index in range(4)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    context = result.source_references[0].request_context
+    assert context["points_offered"] == 4
+    assert context["points_routed"] == 4
+    assert context["truncated"] is False
+    # The prose must not carry a warning that does not apply: a message shown always is
+    # a message read never.
+    assert "只对" not in context["note"]
+
+
+@pytest.mark.asyncio
+async def test_a_capped_route_says_how_many_places_it_actually_covered():
+    """The failure this guards against is a partial route reading as a complete one.
+
+    Ten places are offered, five are routed. Without both numbers in the payload, the
+    five measured legs and the estimated remainder are indistinguishable from a trip
+    that only ever had five places.
+    """
+    provider, http = _provider({"/v3/distance": _counting_sweep}, max_points=5)
+    points = [_point(39.90 + index * 0.01, 116.40) for index in range(10)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    assert len(http.calls) == 5, "the budget must still bound the number of requests"
+    context = result.source_references[0].request_context
+    assert context["truncated"] is True
+    assert context["points_offered"] == 10
+    assert context["points_routed"] == 5
+    assert context["point_budget"] == 5
+    # Said in prose too, because the reader who needs it is looking at a leg.
+    assert "只对 5 个地点" in context["note"]
+    assert "10" in context["note"]
+    assert "估算" in context["note"]
+
+
+@pytest.mark.asyncio
+async def test_the_budget_reads_as_a_budget_not_as_the_trip_size():
+    """``point_count`` alone used to be the only number, and it described the slice.
+
+    A client that trusted it would conclude a ten-place trip has five places.
+    """
+    provider, _ = _provider({"/v3/distance": _counting_sweep}, max_points=3)
+    points = [_point(39.90 + index * 0.01, 116.40) for index in range(8)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    context = result.source_references[0].request_context
+    assert context["points_offered"] == 8
+    assert context["points_offered"] != context["point_count"]
+
+
+def test_the_origin_limit_cannot_be_configured_past_the_protocol():
+    """AMap accepts at most 100 origins per request; that is the protocol, not a knob.
+
+    A budget above it would send a request AMap rejects, losing every leg in the sweep
+    at once — so the clamp is the difference between a degraded route and no route.
+    """
+    provider, _ = _provider(max_points=AMAP_MAX_MATRIX_ORIGINS + 500)
+    assert provider.max_points == AMAP_MAX_MATRIX_ORIGINS
+
+
+def test_a_budget_below_two_is_not_expressible():
+    """Fewer than two points cannot produce a leg, so a budget of 1 would silently
+    disable routing altogether while looking like a valid setting."""
+    provider, _ = _provider(max_points=1)
+    assert provider.max_points >= 2

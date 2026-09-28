@@ -71,6 +71,7 @@ from travel_api.providers.amap.client import (
     parse_float,
     parse_int,
 )
+from travel_api.providers.base import resolve_travel_mode
 from travel_api.providers.free.attribution import AMAP_ATTRIBUTION
 
 logger = logging.getLogger(__name__)
@@ -108,13 +109,26 @@ WALKING_SPEED_METERS_PER_SECOND = 1.25
 #: flagged as an estimate; AMap's own ``taxi_cost`` is used when present.
 ESTIMATED_COST_PER_KM_CNY = 2.5
 
+#: ``/v3/distance`` accepts at most 100 origins per request, as documented by AMap.
+#:
+#: This is protocol knowledge, not a preference, so it lives here rather than in
+#: settings: a value a user could lower would silently reduce route coverage while
+#: looking like a tuning knob. It is enforced structurally on ``max_points`` below,
+#: the same way the OSRM provider clamps to its own coordinate limit, so the sweep's
+#: origins can never exceed it regardless of how the point budget is configured.
+AMAP_MAX_MATRIX_ORIGINS = 100
+
 
 def mode_for_pace(pace: Pace) -> TravelMode:
-    """Pick a travel mode from the trip's pace.
+    """Pick a travel mode from the trip's pace alone.
 
     Mirrors the OSRM provider's choice so that swapping in AMap does not silently
     change which journeys a plan is built around — the only intended difference is
     that AMap can actually answer for the mode it picks.
+
+    Retained as the fallback half of :func:`resolve_travel_mode`; callers that hold a
+    whole profile should use that instead, or an explicit 公交/地铁 request would be
+    ignored.
     """
     return TravelMode.WALK if pace in (Pace.RELAXED, Pace.BALANCED) else TravelMode.DRIVE
 
@@ -140,9 +154,12 @@ class AmapRoutingProvider:
         self.name = name
         self.client = client
         self.ttl_seconds = ttl_seconds
-        #: Kept small on purpose: each point beyond the matrix sweep costs an extra
-        #: request, and the free quota is a monthly call count.
-        self.max_points = max(2, max_points)
+        #: How many places AMap will route. Each point beyond the sweep costs one more
+        #: request and the free quota is a monthly call count, so this is a real cost
+        #: decision that belongs to the owner of the key — it is configurable, and the
+        #: default matches the OSRM provider so that supplying a key never *reduces* how
+        #: much of the itinerary is routed.
+        self.max_points = min(max(2, max_points), AMAP_MAX_MATRIX_ORIGINS)
         self.max_transit_legs = max(1, max_transit_legs)
         self.concurrency = max(1, concurrency)
         #: Which mode the last run actually routed, for the audit trail.
@@ -157,10 +174,17 @@ class AmapRoutingProvider:
         if len(points) < 2:
             return ProviderResult(provider=self.name, data=[])
 
-        mode = mode_for_pace(profile.pace)
+        mode = resolve_travel_mode(profile)
         selected = points[: self.max_points]
+        # Recorded, not just used. `max_points` is a budget, so a trip with more places
+        # than the budget silently routes only the first slice and the rest fall back to
+        # estimates; a reader of one leg cannot tell that from "these are all the places".
+        self.last_points_offered = len(points)
         reference = self._source_reference(
-            mode=mode, point_count=len(selected), destination=profile.destination
+            mode=mode,
+            point_count=len(selected),
+            destination=profile.destination,
+            points_offered=len(points),
         )
 
         if mode is TravelMode.TRANSIT:
@@ -553,8 +577,30 @@ class AmapRoutingProvider:
             source_reference=leg_reference,
         )
 
+    @staticmethod
+    def _reference_note(complete_matrix: bool, truncated: bool, offered: int, routed: int) -> str:
+        """The one-line scope statement carried with the route data.
+
+        Written in prose as well as machine-readable fields, because the reader who most
+        needs to know the route is partial is a person looking at a leg, and they will
+        not parse ``truncated``.
+        """
+        if truncated:
+            return (
+                f"实时查询，未做任何缓存；本次只对 {routed} 个地点计算了路线"
+                f"（共提供 {offered} 个），其余地点的路程由行程规划器估算并已标注为估算"
+            )
+        if complete_matrix:
+            return "实时查询，未做任何缓存"
+        return "按相邻点对实时查询；未覆盖的点对由行程规划器给出并标注为估算"
+
     def _source_reference(
-        self, *, mode: TravelMode, point_count: int, destination: str
+        self,
+        *,
+        mode: TravelMode,
+        point_count: int,
+        destination: str,
+        points_offered: int | None = None,
     ) -> SourceReference:
         """Stamp the fetch time.
 
@@ -563,12 +609,19 @@ class AmapRoutingProvider:
         expiry exists to stop a persisted snapshot from being presented as current
         long after the fact, which is the misrepresentation the freshness rules are
         about.
+
+        ``points_offered`` is how many places the planner handed over. When it exceeds
+        ``point_count``, this reference covers only part of the trip and says so — the
+        alternative is a leg that looks measured while its missing neighbours are
+        estimates, with nothing in the payload to distinguish the two.
         """
         now = datetime.now(timezone.utc)
         # Driving is swept one-destination-at-a-time, so it genuinely covers every
         # ordered pair. Walking and transit are one request per pair and therefore
         # cover only the consecutive ones, which must be stated rather than implied.
         complete_matrix = mode in DISTANCE_TYPE_BY_MODE
+        offered = point_count if points_offered is None else points_offered
+        truncated = offered > point_count
         return SourceReference(
             source=self.name,
             source_type=SourceType.OFFICIAL_API,
@@ -590,17 +643,19 @@ class AmapRoutingProvider:
                 ),
                 "travel_mode": mode.value,
                 "point_count": point_count,
+                # Both numbers, so "we routed 12 places" cannot be read as "the trip has
+                # 12 places".
+                "points_offered": offered,
+                "points_routed": point_count,
+                "point_budget": self.max_points,
+                "truncated": truncated,
                 "city": destination,
                 "attribution": AMAP_ATTRIBUTION.as_credit(),
                 # Disclosed in the data, so a reader of one leg learns the scope
                 # without having to consult the docs.
                 "coverage": "full_matrix" if complete_matrix else "consecutive_pairs",
                 "cached": False,
-                "note": (
-                    "实时查询，未做任何缓存"
-                    if complete_matrix
-                    else "按相邻点对实时查询；未覆盖的点对由行程规划器给出并标注为估算"
-                ),
+                "note": self._reference_note(complete_matrix, truncated, offered, point_count),
             },
             data_version="amap-live",
             confidence=0.85 if complete_matrix else 0.8,

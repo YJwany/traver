@@ -58,6 +58,7 @@ from travel_api.domain.models import (
     TravelMode,
     TripProfile,
 )
+from travel_api.providers.base import resolve_travel_mode
 from travel_api.providers.free.attribution import (
     FOSSGIS_ATTRIBUTION,
     OSRM_ATTRIBUTION,
@@ -216,7 +217,12 @@ def routing_server_for(
 
 
 def mode_for_pace(pace: Pace) -> TravelMode:
-    """Pick a travel mode: walking for relaxed/balanced city trips, driving otherwise."""
+    """Pick a travel mode from the pace alone.
+
+    Retained as the fallback half of :func:`resolve_travel_mode`; callers holding a whole
+    profile should use that instead, so an explicit 公交/地铁 request is not silently
+    treated as a request for something this provider does serve.
+    """
     return TravelMode.WALK if pace in (Pace.RELAXED, Pace.BALANCED) else TravelMode.DRIVE
 
 
@@ -308,7 +314,7 @@ class OsmRoutingProvider:
         if len(points) < 2:
             return ProviderResult(provider=self.name, data=[])
 
-        mode = mode_for_pace(profile.pace)
+        mode = resolve_travel_mode(profile)
         selected = points[: self.max_points]
         coordinates = ";".join(f"{point.longitude:.6f},{point.latitude:.6f}" for point in selected)
 
