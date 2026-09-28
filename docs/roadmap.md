@@ -285,6 +285,12 @@
   Key」是错的补救，而错的补救比没有补救更糟，它会让人去配一个不起作用的凭据
 - 真实端到端验证（零密钥、真实免费源、`travel_mode=transit`）：路段 0 条、无任何来源声称测过
   公交路线、行程仍可规划、矩阵报 `transit: covered=False`，并且行程里确实带着上面那条解释
+- **「已核实的字段名」与「代码读的字段名」如果同出一个假设，就没有任何测试能发现两者一起错**。
+  公交耗时的代价尤其高：读不到时该对不产生路段，于是接入高德的首要理由静默失效，而其余部分看起来全正常。
+  因此 `duration` 从 `transits[].duration` 与 `transits[].cost.duration` 两处依次读取（同一个量，
+  接受任意一处只可能把「没有路段」变成「AMap 实测的路段」，不可能凭空造数），读到哪一处记进
+  `request_context.duration_field`；两处都没有时仍返回 `None`，**不按步行速度推导**——那会给一条真实换乘方案
+  配上编造的耗时。`scripts/probe_amap_transit_shape.py` 用真实 Key 打印实际字段路径，是让假设变成事实的唯一办法
   （`scripts/probe_transit_without_key.py`）
 
 ### 已完成的第 5 步之二：把「缺失」这一个词拆开

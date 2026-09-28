@@ -436,6 +436,101 @@ async def test_transit_uses_the_v5_endpoint_and_stamps_fetch_time():
     assert "地铁2号线" in context["transit_lines"]
     assert context["transit_segment_kinds"] == ["walking", "bus", "railway"]
     assert context["walking_distance_meters"] == 700
+    # And which field each number was read from, so a plan can be checked against the real
+    # response rather than against this fixture's idea of it.
+    assert context["distance_field"] == "transits[].distance"
+    assert context["duration_field"] == "transits[].duration"
+
+
+@pytest.mark.asyncio
+async def test_a_transit_duration_only_inside_cost_is_still_used():
+    """The hedge that matters most: v5 may put the duration only in ``cost``.
+
+    ``transits[].duration`` and ``transits[].cost.duration`` are the same quantity from AMap
+    in the same response, so accepting either can only turn "no leg at all" into "the leg
+    AMap measured" — it cannot fabricate a value. Requiring the top-level one is the failure
+    this guards: it returns ``None``, the pair contributes nothing, and 公交/地铁 — the whole
+    reason to supply a key — silently produces no legs while every test passes, because the
+    fixture and the parser would share the same wrong assumption.
+    """
+    payload = {
+        "status": "1",
+        "route": {
+            "transits": [
+                {
+                    "distance": "8600",
+                    # No `duration` at this level, only inside `cost`.
+                    "cost": {"duration": "2400", "transit_fee": "5.00"},
+                    "segments": [{"walking": {"distance": "300", "duration": "240"}}],
+                }
+            ]
+        },
+    }
+    provider, _ = _provider({"/v5/direction/transit/integrated": payload})
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+
+    legs = await provider._transit_legs(
+        points, _profile(), _reference(provider, TravelMode.TRANSIT)
+    )
+
+    assert len(legs) == 1, "a duration inside cost must not make the leg disappear"
+    assert legs[0].duration_minutes == 40
+    assert legs[0].is_estimate is False, "it is still AMap's measured duration"
+    context = legs[0].source_reference.request_context
+    assert context["duration_field"] == "transits[].cost.duration"
+
+
+@pytest.mark.asyncio
+async def test_a_transit_plan_with_no_duration_anywhere_is_refused():
+    """The other direction: the hedge must not become a default.
+
+    If neither location holds a duration, the pair yields no leg. Deriving one from the
+    walking speed would put an invented number on a leg whose whole value is that it is a
+    real 换乘方案 with a real duration.
+    """
+    payload = {
+        "status": "1",
+        "route": {"transits": [{"distance": "8600", "segments": []}]},
+    }
+    provider, _ = _provider({"/v5/direction/transit/integrated": payload})
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+
+    legs = await provider._transit_legs(
+        points, _profile(), _reference(provider, TravelMode.TRANSIT)
+    )
+
+    assert legs == []
+
+
+@pytest.mark.asyncio
+async def test_a_non_numeric_transit_duration_falls_through_to_cost():
+    """AMap uses the empty string to mean "absent" in some fields.
+
+    A bare ``float("")`` raises; the tolerant read must treat it as absent and keep looking,
+    rather than abandoning a leg whose duration is right there in ``cost``.
+    """
+    payload = {
+        "status": "1",
+        "route": {
+            "transits": [
+                {
+                    "distance": "8600",
+                    "duration": "",
+                    "cost": {"duration": "2400"},
+                    "segments": [],
+                }
+            ]
+        },
+    }
+    provider, _ = _provider({"/v5/direction/transit/integrated": payload})
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+
+    legs = await provider._transit_legs(
+        points, _profile(), _reference(provider, TravelMode.TRANSIT)
+    )
+
+    assert len(legs) == 1
+    assert legs[0].duration_minutes == 40
 
 
 @pytest.mark.asyncio

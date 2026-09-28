@@ -155,6 +155,20 @@ def _unique(messages: list[str], *, limit: int = 3) -> list[str]:
     return seen
 
 
+def _first_number(candidates: tuple[tuple[str, object], ...]) -> tuple[float | None, str | None]:
+    """The first candidate that parses as a number, with the field it came from.
+
+    Returns ``(None, None)`` when none of them is usable, so a caller can refuse to build a
+    leg rather than build one from a default — the whole point being that a missing quantity
+    must stay missing instead of becoming a plausible zero.
+    """
+    for field, raw in candidates:
+        value = parse_float(raw)
+        if value is not None:
+            return value, field
+    return None, None
+
+
 class AmapRoutingProvider:
     """Serves ``calculate_routes`` from AMap, including 公交/地铁."""
 
@@ -389,6 +403,20 @@ class AmapRoutingProvider:
         preferred one. The chosen plan's line names are put in the source context so
         the UI can say "地铁1号线 → 地铁2号线" without a second request — and so a
         reader can see the route was real rather than a straight-line guess.
+
+        **Both quantities are read from either location they can appear in**, and which one
+        was used is recorded in the request context. This is a deliberate hedge: whether v5
+        puts ``duration`` at ``transits[].duration`` or only inside ``transits[].cost`` could
+        not be verified from the documentation in the environment this was written in, and
+        the two are the same number from AMap in the same response — so accepting either can
+        only turn "no leg at all" into "the leg AMap measured", never invent a value.
+
+        Getting this wrong is not a cosmetic failure. A missing ``duration`` here returns
+        ``None``, the pair contributes no leg, and 公交/地铁 — the entire reason to supply a
+        key — silently produces nothing while every unit test passes against the shape the
+        code itself assumed. The recorded field names are what makes that observable for
+        someone who does have a key: ``scripts/probe_amap_transit_shape.py`` prints them
+        against a real response.
         """
         route = payload.get("route")
         if not isinstance(route, dict):
@@ -400,8 +428,16 @@ class AmapRoutingProvider:
         if not isinstance(best, dict):
             return None
 
-        distance = parse_float(best.get("distance"))
-        duration = parse_float(best.get("duration"))
+        cost = best.get("cost")
+        cost = cost if isinstance(cost, dict) else {}
+
+        distance, distance_field = _first_number((("transits[].distance", best.get("distance")),))
+        duration, duration_field = _first_number(
+            (
+                ("transits[].duration", best.get("duration")),
+                ("transits[].cost.duration", cost.get("duration")),
+            )
+        )
         if distance is None or duration is None:
             return None
 
@@ -425,6 +461,11 @@ class AmapRoutingProvider:
                     None if walking_distance is None else int(round(walking_distance))
                 ),
                 "alternatives_available": len(transits),
+                # Which field each number came from, so a reader with a key can confirm the
+                # response shape this plan was parsed against instead of trusting the
+                # comment above. Cheap to carry and impossible to reconstruct afterwards.
+                "distance_field": distance_field,
+                "duration_field": duration_field,
             },
         )
         return leg
