@@ -30,7 +30,11 @@ import type { ExportFormat } from "../../lib/export";
 type AnyRecord = Record<string, any>;
 
 const FORMATS: { format: ExportFormat; label: string; hint: string }[] = [
-  { format: "md", label: "下载 Markdown", hint: "完整记录：行程、限制、预算与每条来源的两个时间" },
+  {
+    format: "md",
+    label: "下载 Markdown",
+    hint: "完整记录：行程、限制、预算、每条来源的两个时间，以及你交进来的内容本身",
+  },
   { format: "ics", label: "下载日历", hint: "逐项事件，可导入手机日历" },
 ];
 
@@ -102,6 +106,11 @@ export function ExportPanel({ trip }: { trip: AnyRecord }) {
           导出的文件是<strong>快照</strong>：里面的数字不会自动更新，文件里写明了它是什么时候生成的。
           Markdown 版会逐条列出每个来源的「抓取时间」与「数据自身时间」，并单独说明哪些数据
           无法判断年龄；请把它当作那一刻的记录，而不是一直有效的攻略。
+        </div>
+        <div className="entity-meta" style={{ marginTop: 8 }}>
+          附录里也会写入<strong>你自己交进来的内容</strong>：正文片段、原文链接、发布时间与抓取时间，
+          以及文中提到的地点被定位到了哪里。行程里的景点随时可以重新抓取，而你保存的那篇内容
+          可能明天就被删掉——所以那份副本留在文件里，不留在我们这里。
         </div>
         {unverifiable === null ? (
           // Absent is not empty. This API predates the field, so nothing here can be said

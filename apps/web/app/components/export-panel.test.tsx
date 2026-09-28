@@ -48,8 +48,18 @@ describe("ExportPanel", () => {
     render(<ExportPanel trip={trip()} />);
 
     expect(screen.getByText(/不会自动更新/)).toBeTruthy();
-    // The reason it is a snapshot, not just the fact: the file carries both times.
-    expect(screen.getByText(/抓取时间/)).toBeTruthy();
+    // The reason it is a snapshot, not just the fact: the file carries both times. Matched
+    // among all of them because the note appendix mentions the same pair of times.
+    expect(screen.getAllByText(/抓取时间/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("says the traveller's own material goes into the file too", () => {
+    // The appendix exists because a saved post can be deleted while a POI cannot. A reader who
+    // does not know it is in the file has no reason to keep the file.
+    render(<ExportPanel trip={trip()} />);
+
+    expect(screen.getByText(/你自己交进来的内容/)).toBeTruthy();
+    expect(screen.getByText(/可能明天就被删掉/)).toBeTruthy();
   });
 
   it("warns that calendar times are wall-clock and will be shown in the device's zone", () => {

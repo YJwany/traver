@@ -190,6 +190,25 @@ class FactKind(StrEnum):
     PLACE_MENTION = "place_mention"
 
 
+#: Chinese wording for each kind, for prose the server writes itself. The export prints it, and
+#: an exported document has no application around it to translate ``opening_hours`` — a reader
+#: who prints the file and takes it travelling would get an English token in a Chinese list.
+#:
+#: Beside the enum so a new kind with no wording here is an omission you can see. The web client
+#: keeps its own copy (``apps/web/lib/ingestions.ts``) because it also carries a display tone
+#: per kind; ``tests/unit/test_web_api_contract.py`` compares the two *key sets*, which is the
+#: part that has to agree — a kind one side knows and the other does not is exactly the
+#: ``packed``-pace defect, one layer out.
+FACT_KIND_LABELS: dict[str, str] = {
+    FactKind.PRICE.value: "价格",
+    FactKind.DURATION.value: "时长",
+    FactKind.OPENING_HOURS.value: "开放 / 闭馆",
+    FactKind.TIP.value: "建议",
+    FactKind.WARNING.value: "提醒",
+    FactKind.PLACE_MENTION.value: "提到的地点",
+}
+
+
 class ExtractionConfidence(StrEnum):
     """Bands, not decimals, for how sure the extractor is about its reading.
 
@@ -201,6 +220,18 @@ class ExtractionConfidence(StrEnum):
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
+
+
+#: Chinese wording for each band. Wording about the *reading*, never about the truth of the
+#: claim: the export says 「识别明确」 next to a remembered price, which means the pattern was
+#: unambiguous, not that the price is real. Printing the band as a number (0.8) would imply a
+#: calibration this does not have, and printing nothing would drop the one signal that says a
+#: line might have been misread.
+CONFIDENCE_LABELS: dict[str, str] = {
+    ExtractionConfidence.HIGH.value: "识别明确",
+    ExtractionConfidence.MEDIUM.value: "识别一般",
+    ExtractionConfidence.LOW.value: "仅为线索",
+}
 
 
 #: Numeric midpoint per band, for code that needs to sort or combine. Exposed as a

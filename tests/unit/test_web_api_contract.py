@@ -219,6 +219,37 @@ def test_a_trip_that_never_mentions_a_mode_stores_none(client):
     assert response.json()["profile"].get("travel_mode") is None
 
 
+INGESTIONS_LIB = Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "ingestions.ts"
+
+
+def test_the_web_knows_exactly_the_fact_kinds_the_server_can_produce():
+    """``FACT_KINDS`` in the web client against ``FactKind`` in the API.
+
+    The ``packed``-pace shape, one layer out. The extractor and the note list are described by
+    the same vocabulary, and the web keeps its own copy of it because each entry also carries a
+    display tone. A kind the server can emit and the web cannot name renders as a raw identifier
+    in a Chinese chip; a kind the web names and the server never emits is a legend entry for a
+    fact that does not exist.
+
+    Only the **keys** are compared, not the labels. The two sides legitimately word things
+    differently — the web has a chip-sized label and the export has a table-cell one — and
+    asserting on the strings would make this test a copy of them.
+    """
+    from travel_api.domain.ingestion import FactKind
+
+    source = INGESTIONS_LIB.read_text(encoding="utf-8")
+    match = re.search(r"export const FACT_KINDS[^{]*\{(.*?)\n\};", source, re.DOTALL)
+    assert match, f"could not find `FACT_KINDS` in {INGESTIONS_LIB.name}"
+    declared = set(re.findall(r"^\s*([a-z_]+):\s*\{", match.group(1), re.MULTILINE))
+    assert declared, "an empty table means the scan is wrong and this check is vacuous"
+
+    expected = {member.value for member in FactKind}
+    assert declared == expected, (
+        "the web and the API disagree about fact kinds. "
+        f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
+    )
+
+
 def test_the_resolver_agrees_with_what_the_api_stored(client):
     """The stored mode is what the routing provider will act on, so they must match."""
     from travel_api.domain.models import TravelMode, TripProfile

@@ -462,6 +462,23 @@ class PlaceResolutionStatus(StrEnum):
     NOT_ATTEMPTED = "not_attempted"
 
 
+#: Chinese wording for each outcome, because the export prints it into a document that has to
+#: explain itself without the application around it. Beside the enum for the same reason as
+#: ``ITEM_TYPE_LABELS``: a fifth status with no wording here is a visible omission, whereas a
+#: bare ``not_attempted`` in a printed itinerary is an English identifier in Chinese prose.
+#:
+#: ``not_found`` and ``not_attempted`` are worded so they cannot be confused. The first says a
+#: source was asked; the second says the lookup did not happen and why. Collapsing them is the
+#: fabrication this status exists to prevent — 「没有找到这个地方」 is a claim about the world,
+#: and a deployment with no geocoder has no basis for it.
+PLACE_STATUS_LABELS: dict[str, str] = {
+    PlaceResolutionStatus.LOCATED.value: "已定位（在目的地范围内）",
+    PlaceResolutionStatus.ELSEWHERE.value: "在别处（同名地点不在目的地附近）",
+    PlaceResolutionStatus.NOT_FOUND.value: "已查询地名来源，没有该名称的结果",
+    PlaceResolutionStatus.NOT_ATTEMPTED.value: "没有查询（本次规划没有可用的地名定位来源）",
+}
+
+
 class ResolvedPlace(BaseModel):
     """A name from the traveller's own material, put on the map — or not, and why.
 

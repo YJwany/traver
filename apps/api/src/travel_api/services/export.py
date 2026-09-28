@@ -23,7 +23,11 @@ printed alongside and the relative one says what it is relative to.
 ## Two formats, two different jobs
 
 **Markdown** is the full record: the itinerary, what it could not do, the budget and every
-source reference with its times. It is meant to be read and kept.
+source reference with its times. It is meant to be read and kept — and that includes the
+traveller's **own** material, in an appendix at the end. Those notes and the places they named
+are the only part of a plan that cannot be fetched again: a data source will answer tomorrow,
+a deleted post will not. An earlier version of this module reached every field of a preview
+except those, which left the archive missing exactly the part that needs archiving.
 
 **iCalendar** is the part that ends up on a phone. It deliberately does *not* try to be a
 complete record — an event description that is a wall of text gets collapsed by every client.
@@ -55,9 +59,11 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
+from travel_api.domain.ingestion import CONFIDENCE_LABELS, FACT_KIND_LABELS
 from travel_api.domain.models import (
     ITEM_TYPE_LABELS,
     PACE_LABELS,
+    PLACE_STATUS_LABELS,
     TRAVEL_MODE_LABELS,
     SourceReference,
     Trip,
@@ -264,6 +270,13 @@ def to_markdown(trip: Trip, *, generated_at: datetime | None = None) -> str:
     # program can produce.
     out.extend(_markdown_budget(trip))
 
+    # Last, as an appendix, and that placement is a decision. Everything above comes from a
+    # source Traver fetched; this comes from the traveller. Putting it first would put one
+    # person's remembered prices ahead of the measured ones, which is the ordering the server
+    # refuses everywhere else.
+    out.extend(_markdown_notes(trip))
+    out.extend(_markdown_places(trip))
+
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -408,6 +421,207 @@ def _markdown_sources(trip: Trip) -> list[str]:
     return out
 
 
+# -- the traveller's own material -------------------------------------------
+
+
+def _markdown_notes(trip: Trip) -> list[str]:
+    """What the traveller supplied, grouped by where it came from.
+
+    This section existed as a hole. Every other field of a preview reached the document and the
+    notes did not, which is the wrong way round: the notes are the **only** copy of material
+    that has no API behind it. A 小红书 post can be deleted, a 抖音 video taken down, an account
+    made private — the itinerary's POIs can always be fetched again from a data source, and this
+    cannot. An export that omits it is the archive missing the irreplaceable part.
+
+    Grouped by ingestion rather than listed flat, because the questions a reader has are about
+    the *source* — who wrote it, when, and is the link still good — and those answers are the
+    same for every fact from one page. Repeating the URL on each of a dozen rows would bury it.
+
+    Every fact keeps its ``evidence``, the verbatim span it was read from, and the reason it was
+    read that way. That is the whole point of quoting: a reader who disagrees with 「人均 80」 can
+    see which sentence produced it and decide for themselves. A note printed without its source
+    sentence is an assertion.
+    """
+    preview = trip.preview
+    if preview is None:
+        return []
+    notes = list(preview.ingested_notes or [])
+    if not notes:
+        return []
+
+    grouped: dict[str, list[dict]] = {}
+    for note in notes:
+        grouped.setdefault(str(note.get("ingestion_id", "")), []).append(note)
+
+    out: list[str] = ["## 你提供的内容 / your notes", ""]
+    out.append(
+        f"共 {len(notes)} 条，来自 {len(grouped)} 篇你交进来的内容。"
+        "这些是**某个人说的**，不是实测值：它们只作为提示与估算进入上面那份行程，"
+        "没有覆盖任何来源的实测路线、报价或评分。"
+    )
+    out.append("")
+
+    for index, (_, facts) in enumerate(grouped.items(), start=1):
+        first = facts[0]
+        title = first.get("title") or "（这篇内容没有标题）"
+        out.append(f"### {index}. {_escape_cell(str(title))}")
+        out.append("")
+        out.append(f"- 平台：{_escape_cell(str(first.get('platform', '未知')))}")
+        if first.get("author"):
+            out.append(f"- 作者：{_escape_cell(str(first['author']))}")
+        if first.get("url"):
+            out.append(f"- 原文：{first['url']}")
+        # Both times, always, and the missing one is stated rather than left blank. This is the
+        # traveller's own material, so mis-stating its age would misrepresent them rather than a
+        # provider: a note saved today from a 2019 post would read as current advice.
+        if first.get("published_at"):
+            out.append(
+                f"- 原文发布时间：{str(first['published_at'])[:10]}"
+                "（这是这段建议的年龄；页面自己写的）"
+            )
+        else:
+            out.append("- 原文发布时间：**页面没有标注**（因此这段建议有多旧无法判断）")
+        out.append(
+            f"- 抓取时间：{_iso(_parse_moment(first.get('ingested_at')))}（我们把它存下来的时刻）"
+        )
+        out.append("")
+
+        out.append("| 读到的内容 | 类型 | 识别把握 | 依据 | 原文片段 |")
+        out.append("| --- | --- | --- | --- | --- |")
+        for note in facts:
+            kind = FACT_KIND_LABELS.get(
+                str(note.get("kind", "")), str(note.get("kind", "未知类型"))
+            )
+            confidence = CONFIDENCE_LABELS.get(
+                str(note.get("confidence", "")), str(note.get("confidence", ""))
+            )
+            out.append(
+                f"| {_escape_cell(str(note.get('text', '')))} "
+                f"| {_escape_cell(kind)} "
+                f"| {_escape_cell(confidence)} "
+                f"| {_escape_cell(str(note.get('reason', '')))} "
+                f"| {_escape_cell(str(note.get('evidence', '')))} |"
+            )
+        out.append("")
+
+        matched = [note for note in facts if note.get("matched")]
+        if matched:
+            names = sorted({str(note.get("matched_entity_name")) for note in matched})
+            out.append(f"其中 {len(matched)} 条已关联到行程中的地点：{'、'.join(names)}。")
+        else:
+            out.append("这一篇里没有任何一条关联到行程中的实体。")
+        out.append("")
+
+    out.append(
+        "「识别把握」说的是**我们读得准不准**，不是这件事是不是真的——"
+        "「识别明确」意味着那句话按这个读法没有第二种解释，「仅为线索」意味着换一种读法也说得通。"
+        "两者都不代表这个价格今天还成立。"
+    )
+    out.append("")
+    return out
+
+
+def _parse_moment(value: Any) -> datetime:
+    """A stored ISO string back to a datetime, for printing only.
+
+    The notes arrive as JSON dicts (``TripPreview.ingested_notes`` is deliberately untyped — see
+    its docstring), so their timestamps are strings. Falls back to the epoch rather than raising:
+    a malformed timestamp in one note must not cost the traveller the whole document.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return datetime.fromtimestamp(0, tz=timezone.utc)
+    return datetime.fromtimestamp(0, tz=timezone.utc)
+
+
+def _markdown_places(trip: Trip) -> list[str]:
+    """Where the names in those notes are, for the ones our sources did not have.
+
+    An appendix to the appendix, because these come from the same material. The section states
+    the four outcomes in full rather than printing only the hits: a name that was looked up and
+    is 950 km away is a fact about the note, and a name nobody looked for is a fact about this
+    deployment. Both are things the reader can act on, and neither is "not found".
+
+    Nothing here is a scheduled visit, and the section says so. A mention is evidence somebody
+    liked a place; putting it on a day would be this tool deciding the traveller's trip for
+    them, which is not a decision an export may make on their behalf.
+    """
+    preview = trip.preview
+    if preview is None:
+        return []
+    places = list(preview.ingested_places or [])
+    if not places:
+        return []
+
+    out: list[str] = ["## 文中提到的地点 / places your notes named", ""]
+    out.append(
+        "这些地名来自上面的内容，**不是查到的景点**：没有评分、票价或营业时间，"
+        "也**没有被排进任何一天**。把它们落到坐标上，是为了让你知道那篇内容说的具体是哪儿——"
+        "下面这张表里有定位到的、有同名地点在别处的，也有本次没有来源可查的，"
+        "三种结果的下一步不一样，所以分开写。"
+    )
+    out.append("")
+    out.append("| 地名 | 定位结果 | 来源给出的名称 | 坐标 | 距目的地中心（直线） | 判定依据 |")
+    out.append("| --- | --- | --- | --- | --- | --- |")
+    for place in places:
+        status = PLACE_STATUS_LABELS.get(str(place.get("status", "")), str(place.get("status", "")))
+        coordinates = place.get("coordinates") or {}
+        if coordinates:
+            position = (
+                f"{coordinates.get('latitude'):.4f}, {coordinates.get('longitude'):.4f}"
+                if coordinates.get("latitude") is not None
+                else "—"
+            )
+        else:
+            position = "—"
+        distance = place.get("straight_line_from_centre_km")
+        out.append(
+            f"| {_escape_cell(str(place.get('name', '')))} "
+            f"| {_escape_cell(status)} "
+            f"| {_escape_cell(str(place.get('display_name') or '—'))} "
+            f"| {position} "
+            f"| {'—' if distance is None else f'{distance} 公里'} "
+            f"| {_escape_cell(str(place.get('reason', '')))} |"
+        )
+    out.append("")
+
+    located = [place for place in places if place.get("status") == "located"]
+    elsewhere = [place for place in places if place.get("status") == "elsewhere"]
+    unlooked = [place for place in places if place.get("status") == "not_attempted"]
+
+    if located:
+        out.append(
+            f"{len(located)} 个已定位。同名地点（西湖在杭州、惠州、扬州都有）按「离目的地最近」"
+            "消歧，所以一个定位结果是**一次判定**而不是一次查证："
+            "上面那一列来源给出的名称就是被选中的那个，若与你所知的不符，以你的判断为准。"
+        )
+        out.append("")
+    if elsewhere:
+        out.append(
+            f"{len(elsewhere)} 个在别处。这些名称确实存在，但离目的地很远，"
+            "很可能不是那篇内容所指的那个。"
+        )
+        out.append("")
+    if unlooked:
+        out.append(
+            f"{len(unlooked)} 个没有查过：本次规划没有可用的地名定位来源。"
+            "**这不是「没有这个地方」，也不是「没有找到」**——是没有人去查。"
+        )
+        out.append("")
+    out.append(
+        "距离是**直线距离**（两点之间的大圆距离），只能回答「是不是同一个城市」，"
+        "不能用来推算走过去要多久；本文档没有从它推出任何通行时间。"
+        "地理编码的名称索引不公布自己的重建时间，所以这些结果只知道抓取时间，"
+        "不知道索引本身有多新。"
+    )
+    out.append("")
+    return out
+
+
 # -- iCalendar --------------------------------------------------------------
 
 
@@ -541,6 +755,18 @@ def to_ics(trip: Trip, *, generated_at: datetime | None = None) -> str:
         )
     if trip.itinerary.conflicts:
         footer_bits.append("本行程的已知限制：" + "；".join(trip.itinerary.conflicts) + "。")
+    # Named on every event when any exists, because a calendar that silently omits material the
+    # traveller supplied would look complete. The count is derived from the resolutions rather
+    # than from the notes: a note that matched a POI is already represented by that POI's day.
+    located = [
+        place
+        for place in ((preview.ingested_places or []) if preview is not None else [])
+        if place.get("status") == "located"
+    ]
+    if located:
+        footer_bits.append(
+            f"另有 {len(located)} 个来自你自己笔记的地点已定位但未排进行程，详见 Markdown 导出。"
+        )
     footer = " ".join(footer_bits)
 
     calendar_description = (

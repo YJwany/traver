@@ -95,6 +95,91 @@ def test_the_exported_document_states_its_own_snapshot_status(tmp_path):
     assert "全部标明了数据自身的时间" not in body
 
 
+def test_a_travellers_own_note_reaches_the_downloaded_file(tmp_path):
+    """The appendix over the wire, because that is where the notes could be lost.
+
+    ``ingested_notes`` is an untyped list of dicts on the preview and the export reads it by key,
+    so only an end-to-end run proves the keys that reach the database are the keys the document
+    looks for. A rename on either side produces an appendix that is silently empty — a document
+    that looks complete while having lost the one part that cannot be fetched again.
+
+    The note is saved *before* the trip is created, because ``create`` builds the preview, and a
+    preview reads the notes that exist when it runs.
+    """
+    with TestClient(create_app(_settings(tmp_path, "notes.db"))) as client:
+        saved = client.post(
+            "/api/v1/ingestions",
+            json={
+                "text": "楼外楼人均 80 元左右，不过周一闭馆，建议早点去。",
+                "url": "https://example.invalid/note/1",
+                "title": "杭州三天两夜",
+                "published_at": "2024-05-01",
+            },
+        )
+        assert saved.status_code in (200, 201), saved.text
+
+        trip = _create(client)
+        body = client.get(f"/api/v1/trips/{trip['id']}/export.md").text
+
+    # The failure being guarded against is an empty appendix, so assert on content rather than on
+    # the heading alone: a heading with nothing under it is exactly what a renamed key produces.
+    assert "你提供的内容" in body
+    assert "楼外楼人均 80 元左右" in body, "the quoted span did not survive to the document"
+    assert "2024-05-01" in body, "the page's own publication date is missing"
+    assert "某个人说的" in body
+    assert "https://example.invalid/note/1" in body
+
+
+def test_the_preview_carries_every_key_the_export_reads(tmp_path):
+    """The key contract, asserted on its own so a failure says which side broke.
+
+    The document reading ``matched_entity_name`` while the preview sends ``matched_name`` is
+    invisible in both directions: the preview is valid JSON and the document is valid Markdown.
+    Naming each key turns that into one failing assertion that says which one.
+    """
+    with TestClient(create_app(_settings(tmp_path, "keys.db"))) as client:
+        saved = client.post(
+            "/api/v1/ingestions",
+            json={
+                "text": "楼外楼人均 80 元左右，不过周一闭馆，建议早点去。",
+                "url": "https://example.invalid/note/1",
+                "title": "杭州三天两夜",
+                "published_at": "2024-05-01",
+            },
+        )
+        assert saved.status_code in (200, 201), saved.text
+        preview = client.post(
+            "/api/v1/trips/preview",
+            json={
+                "destination": "杭州",
+                "start_date": "2026-10-03",
+                "end_date": "2026-10-05",
+                "travelers": 2,
+                "total_budget": 5000,
+            },
+        ).json()
+
+    notes = preview["ingested_notes"]
+    assert notes, "the preview reported no extracted facts at all"
+    for key in (
+        "ingestion_id",
+        "platform",
+        "url",
+        "title",
+        "author",
+        "kind",
+        "text",
+        "evidence",
+        "confidence",
+        "reason",
+        "published_at",
+        "ingested_at",
+        "matched",
+        "matched_entity_name",
+    ):
+        assert key in notes[0], f"the export reads {key!r} and the preview does not send it"
+
+
 def test_an_unknown_trip_is_not_found_in_both_formats(tmp_path):
     unknown = "00000000-0000-0000-0000-000000000000"
     with TestClient(create_app(_settings(tmp_path, "missing.db"))) as client:

@@ -23,19 +23,31 @@ or a provider name, and a test that must be relaxed constantly stops being read.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timezone
+from decimal import Decimal
 
+from travel_api.domain.ingestion import (
+    CONFIDENCE_LABELS,
+    FACT_KIND_LABELS,
+    ExtractionConfidence,
+    FactKind,
+)
 from travel_api.domain.models import (
     ITEM_TYPE_LABELS,
     PACE_LABELS,
+    PLACE_STATUS_LABELS,
     TRAVEL_MODE_LABELS,
     Attraction,
+    BudgetBreakdown,
     Coordinates,
     Itinerary,
     ItineraryItemType,
     Location,
     Pace,
+    PlaceResolutionStatus,
     TravelMode,
+    Trip,
+    TripPreview,
     TripProfile,
 )
 from travel_api.services.aggregation import _disclose_unserved_travel_mode
@@ -89,6 +101,86 @@ def _profile() -> TripProfile:
         start_date=date(2026, 10, 3),
         end_date=date(2026, 10, 5),
         pace=Pace.BALANCED,
+    )
+
+
+def _trip_with_traveller_material() -> Trip:
+    """A plan carrying one of each note kind and one of each place outcome.
+
+    Every kind and every status, so the section each one prints through is exercised — a
+    fallback to the raw identifier only shows up for the member that is present.
+    """
+    notes = [
+        {
+            "ingestion_id": f"ing-{index}",
+            "platform": "小红书",
+            "url": None,
+            "title": "杭州三天两夜",
+            "author": "某位用户",
+            "kind": kind.value,
+            "text": "文中的一句话",
+            "evidence": "原文里逐字的那一段",
+            "confidence": confidence.value,
+            "reason": "「元」紧跟数字",
+            "published_at": None,
+            "ingested_at": "2026-09-28T10:00:00+00:00",
+            "data_age_is_known": False,
+            "matched": False,
+            "matched_entity_id": None,
+            "matched_entity_name": None,
+            "matched_entity_kind": None,
+        }
+        for index, (kind, confidence) in enumerate(
+            ((kind, confidence) for kind in FactKind for confidence in ExtractionConfidence),
+            start=1,
+        )
+    ]
+    places = [
+        {
+            "name": f"地名{index}",
+            "status": status.value,
+            "coordinates": {"latitude": 30.2408, "longitude": 120.101}
+            if status is PlaceResolutionStatus.LOCATED
+            else None,
+            "display_name": "来源给出的名称"
+            if status is not PlaceResolutionStatus.NOT_ATTEMPTED
+            else None,
+            "match_confidence": None,
+            "straight_line_from_centre_km": 6.4
+            if status in {PlaceResolutionStatus.LOCATED, PlaceResolutionStatus.ELSEWHERE}
+            else None,
+            "reason": "判定依据的一句话",
+            "source_reference": None,
+        }
+        for index, status in enumerate(PlaceResolutionStatus, start=1)
+    ]
+    profile = _profile()
+    return Trip(
+        profile=profile,
+        itinerary=Itinerary(),
+        updated_at=datetime(2026, 9, 28, 10, 0, tzinfo=timezone.utc),
+        preview=TripPreview(
+            profile=profile,
+            hotels=[],
+            hotel_offers=[],
+            hotel_decisions=[],
+            restaurants=[],
+            attractions=[],
+            route_legs=[],
+            budget=BudgetBreakdown(
+                items=[],
+                total=Decimal("0"),
+                budget_limit=None,
+                remaining=None,
+                over_budget=False,
+            ),
+            provider_health=[],
+            source_references=[],
+            stale_facts=[],
+            age_unknown_facts=[],
+            ingested_notes=notes,
+            ingested_places=places,
+        ),
     )
 
 
@@ -153,3 +245,60 @@ def test_every_item_kind_and_pace_has_a_chinese_label():
     for member in TravelMode:
         assert member.value in TRAVEL_MODE_LABELS, f"{member.value} has no label"
         assert not _english_words(TRAVEL_MODE_LABELS[member.value])
+
+
+def test_every_ingestion_kind_has_a_chinese_label():
+    """The tables the export's notes appendix prints from.
+
+    This is where a leak is most likely, because these enums live in the ingestion domain and
+    grew independently of the export. ``opening_hours`` in a printed, offline document is an
+    English token in the middle of a Chinese list of what somebody's post said.
+    """
+    for member in FactKind:
+        assert member.value in FACT_KIND_LABELS, f"{member.value} has no label"
+        assert not _english_words(FACT_KIND_LABELS[member.value])
+    for member in ExtractionConfidence:
+        assert member.value in CONFIDENCE_LABELS, f"{member.value} has no label"
+        assert not _english_words(CONFIDENCE_LABELS[member.value])
+
+
+def test_every_place_resolution_status_has_a_chinese_label():
+    """And the four outcomes, checked for exhaustiveness for a second reason.
+
+    A fifth status with no wording would print its identifier — and, worse, the two that produce
+    no coordinate would be one label again by default, which is the distinction the enum exists
+    to make.
+    """
+    for member in PlaceResolutionStatus:
+        assert member.value in PLACE_STATUS_LABELS, f"{member.value} has no label"
+        assert not _english_words(PLACE_STATUS_LABELS[member.value])
+    assert (
+        PLACE_STATUS_LABELS[PlaceResolutionStatus.NOT_FOUND.value]
+        != PLACE_STATUS_LABELS[PlaceResolutionStatus.NOT_ATTEMPTED.value]
+    ), "the two lookup outcomes must not share wording"
+
+
+def test_the_appendix_the_server_writes_for_traveller_material_is_chinese():
+    """The property check applied to the two new sections, on Chinese input.
+
+    The scoped form of the test above, and deliberately scoped three ways:
+
+    * **only these two builders**, so the provider identifiers in the sources table — machine
+      names with a display name beside them — are not dragged in;
+    * **heading lines are skipped**. Every section heading in this project is a bilingual label
+      (「## 行程 / itinerary」, 「## 时效性 / freshness」), which is a convention rather than an
+      untranslated sentence. Skipping the whole line is coarser than skipping the gloss, and
+      coarser is what this should be: a finer rule would need to know where the gloss starts,
+      which is the kind of cleverness that makes a guard stop being read;
+    * **a Chinese fixture**, because a note's title and quoted sentence are the traveller's text
+      and may be in any language. This checks what the *server* composed.
+    """
+    from travel_api.services.export import _markdown_notes, _markdown_places
+
+    trip = _trip_with_traveller_material()
+    sections = _markdown_notes(trip) + _markdown_places(trip)
+    # A fixture that produced nothing would make every assertion below vacuous.
+    prose = [line for line in sections if line and not line.startswith("#")]
+    assert len(prose) > 20, "the fixture no longer produces both sections"
+    for line in prose:
+        assert not _english_words(line), f"export prose contains English: {line!r}"
