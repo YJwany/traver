@@ -538,7 +538,14 @@ async def build_preview(
     # dated-but-old one as too old, without either being treated as current merely because
     # the traveller supplied it. Judging before the notes were added would have needed a
     # second pass, and a second pass is how the earlier verdict gets silently dropped.
-    stale_facts = freshness.stale_facts(typed_refs)
+    #
+    # One call, split by reason. The two are kept apart all the way to the reader: a stale
+    # fact means we know it is too old, an unverifiable one means we cannot say. Reporting
+    # only the first left an empty banner that read as "everything was checked and current"
+    # on a plan where most sources publish no observation time at all.
+    findings = freshness.audit(typed_refs)
+    stale_facts = [finding for finding in findings if finding["reason"] == "too_old"]
+    age_unknown_facts = [finding for finding in findings if finding["reason"] == "age_unknown"]
 
     provider_audit = (
         [_audit_entry("search_hotels", result) for result in hotel_results]
@@ -566,6 +573,7 @@ async def build_preview(
         provider_audit=provider_audit,
         source_references=refs,
         stale_facts=stale_facts,
+        age_unknown_facts=age_unknown_facts,
         ingested_notes=ingested_notes,
         generated_at=datetime.now(timezone.utc),
     )

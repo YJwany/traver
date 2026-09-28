@@ -743,9 +743,24 @@ class TripPreview(BaseModel):
     source_references: list[SourceReference]
     #: Facts whose *own* age exceeds what their kind allows, so they must not be
     #: presented as current. A trip is planned for the future, so a stale fact is
-    #: worse than a missing one: it looks like knowledge. Empty is the normal case,
-    #: and an empty list means every contributing fact was within its horizon.
+    #: worse than a missing one: it looks like knowledge.
+    #:
+    #: Empty does **not** mean every fact was verified recent — it means none was
+    #: provably too old. Those are different claims, and conflating them was a real
+    #: defect: the free stack publishes an observation time for its POI data but not
+    #: for weather, Wikipedia or the holiday calendar, so a typical plan has many
+    #: unverifiable facts and an empty ``stale_facts``. Read the two lists together.
     stale_facts: list[dict[str, Any]] = Field(default_factory=list)
+    #: Facts whose age cannot be established at all, because the source does not
+    #: publish when its data was produced.
+    #:
+    #: Reported separately from ``stale_facts`` rather than merged into it, because
+    #: the remedies differ: a stale fact is re-fetched or discarded, an unverifiable
+    #: one is disclosed. Emitting these as staleness would cry wolf on every plan, and
+    #: omitting them entirely would leave an empty banner implying a verification that
+    #: never happened. The count is the honest middle: we know when we asked, we do
+    #: not know how old the answer was.
+    age_unknown_facts: list[dict[str, Any]] = Field(default_factory=list)
     #: Advice the traveller supplied themselves — a pasted 小红书 note, a 大众点评 review —
     #: matched against the entities in this plan.
     #:

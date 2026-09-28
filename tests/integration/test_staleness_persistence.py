@@ -17,6 +17,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+from fastapi.testclient import TestClient
+from travel_api.config import Settings
 from travel_api.db.session import Database
 from travel_api.db.uow import UnitOfWork
 from travel_api.domain.models import (
@@ -29,6 +31,7 @@ from travel_api.domain.models import (
     TripPreview,
     TripProfile,
 )
+from travel_api.main import create_app
 from travel_api.services.freshness import FreshnessService
 
 
@@ -49,7 +52,12 @@ def _reference(*, observed_at: datetime, basis: ObservationBasis) -> SourceRefer
     )
 
 
-def _trip_with(findings: list[dict], references: list[SourceReference]) -> Trip:
+def _trip_with(
+    findings: list[dict],
+    references: list[SourceReference],
+    *,
+    unverifiable: list[dict] | None = None,
+) -> Trip:
     profile = TripProfile(
         destination="北京",
         start_date=date(2026, 10, 1),
@@ -77,6 +85,7 @@ def _trip_with(findings: list[dict], references: list[SourceReference]) -> Trip:
             provider_health=[],
             source_references=references,
             stale_facts=findings,
+            age_unknown_facts=unverifiable if unverifiable is not None else [],
         ),
     )
 
@@ -175,7 +184,90 @@ def test_a_clean_plan_stores_an_empty_list_and_says_so(tmp_path):
     assert reloaded.preview.stale_facts == []
     dumped = reloaded.preview.model_dump(mode="json")
     assert "stale_facts" in dumped
-    assert dumped["stale_facts"] == []
+
+
+def test_an_unverifiable_fact_is_reachable_and_kept_apart_from_a_stale_one(tmp_path):
+    """``age_unknown`` must survive to the client, and must not be filed as staleness.
+
+    Both halves of this were once broken in the same direction. The audit computed
+    ``age_unknown`` findings and then threw them away — only the too-old subset was assigned
+    to ``stale_facts`` — so the API reported an empty staleness list for a plan where most
+    sources publish no observation time at all, and an empty list reads as "verified
+    current". The docs had claimed the two were reported separately the whole time.
+
+    Kept apart rather than merged because the remedies differ: a stale fact is re-fetched or
+    discarded, an unverifiable one can only be disclosed. Folding the second into the first
+    would put a warning on every plan; dropping it, which is what happened, claimed a
+    verification nobody performed.
+    """
+    database = Database(f"sqlite:///{tmp_path / 'unknown.db'}")
+    database.create_all()
+
+    now = datetime.now(timezone.utc)
+    silent = _reference(
+        basis=ObservationBasis.SOURCE_SILENT, observed_at=now - timedelta(minutes=1)
+    )
+    findings = FreshnessService().audit([("weather", silent)], now=now)
+    assert [finding["reason"] for finding in findings] == ["age_unknown"]
+
+    trip = _trip_with([], [silent], unverifiable=findings)
+    with UnitOfWork(database.session_factory) as uow:
+        uow.trips.create(trip)
+    with UnitOfWork(database.session_factory) as uow:
+        reloaded = uow.trips.get(trip.id)
+
+    # It round-trips, so it can reach a reader.
+    assert [finding["reason"] for finding in reloaded.preview.age_unknown_facts] == ["age_unknown"]
+    # And it is not filed as staleness, which would be an assertion the source gave us no
+    # grounds for.
+    assert reloaded.preview.stale_facts == []
+
+
+def test_both_freshness_lists_are_always_present_over_http(tmp_path):
+    """A client must be able to tell "nothing flagged" from "the field was dropped".
+
+    This is why the panel treats an absent ``age_unknown_facts`` as unknown rather than as
+    empty: if the field could go missing, an empty reading would manufacture a verification.
+    The API's job is to make absence impossible in the first place.
+    """
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite:///{tmp_path / 'both.db'}",
+        auto_create_schema=True,
+        auth_enabled=False,
+        credential_key_file=str(tmp_path / "credential.key"),
+        provider_retry_count=0,
+        free_providers_enabled=False,
+        mock_provider_enabled=True,
+    )
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/api/v1/trips",
+            json={
+                "destination": "成都",
+                "start_date": "2026-10-03",
+                "end_date": "2026-10-05",
+                "travelers": 2,
+                "total_budget": 5000,
+            },
+        )
+        assert created.status_code == 200
+        preview_payload = created.json()["preview"]
+
+        assert "stale_facts" in preview_payload
+        assert "age_unknown_facts" in preview_payload
+        # The fixture's references carry no observation basis, so they are unverifiable —
+        # which is exactly the state whose disclosure used to be missing.
+        assert preview_payload["age_unknown_facts"], (
+            "the deterministic fixture stamps no observation basis, so at least one "
+            "reference must be reported as unverifiable"
+        )
+        for finding in preview_payload["age_unknown_facts"]:
+            assert finding["reason"] == "age_unknown"
+            # The disclosure has to name the source and both times, or it cannot be checked.
+            assert finding["source"]
+            assert finding["fetched_at"]
+            assert finding["evaluated_at"]
 
 
 def test_the_api_exposes_the_staleness_verdict_on_a_stored_trip(tmp_path):
