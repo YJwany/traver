@@ -23,3 +23,10 @@ coverage/
 htmlcov/
 *.egg-info/
 .DS_Store
+# TypeScript incremental build state. Committing it produces a tracked artefact
+# that changes on every build, so every diff carries noise and CI can disagree
+# with a developer's stale cache.
+*.tsbuildinfo
+# Vitest / Vite caches.
+.vitest/
+vite.config.ts.timestamp-*

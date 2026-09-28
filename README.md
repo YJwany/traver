@@ -81,13 +81,51 @@ npm run dev
 
 没有 AI Key 时，Web 仍使用本地规则规划完整 Demo；接入 OpenAI-compatible 服务时，在 `.env` 配置 `AI_BASE_URL`、`AI_API_KEY` 和 `AI_MODEL`。业务层不会直接依赖具体厂商 SDK。
 
-启动 PostgreSQL、Redis 和 API：
+## 认证与行程隔离
+
+默认 `AUTH_ENABLED=false`，本机开发无需任何密钥；`/api/v1/health` 会报告当前认证模式，未启用的部署不会被误认为已加固。
+
+要对外暴露时先启用认证——没有认证时，任何能访问该端口的客户端都可以读写全部行程：
+
+```powershell
+# 1. 生成第一把密钥（只显示一次）
+$env:DATABASE_URL='sqlite:///./travel.db'
+python -m travel_api.cli create-key --owner alice --label laptop
+
+# 2. 启动时启用认证
+$env:AUTH_ENABLED='true'
+python -m travel_api
+```
+
+密钥以 `trv_` 开头，服务端只保存 SHA-256 摘要与一个 12 字符的显示前缀，明文不落库、不可再取回。行程按属主隔离，一把密钥读不到另一把密钥创建的行程。
+
+```powershell
+python -m travel_api.cli list-keys
+python -m travel_api.cli revoke-key <key-id>
+```
+
+Web 端在 http://127.0.0.1:3000/settings 粘贴密钥。密钥只保存在该浏览器的 `localStorage`，不会进入前端构建产物：`NEXT_PUBLIC_*` 会被内联进 JavaScript 包，任何人打开页面都能读到，因此这里刻意不使用它。CI 会在构建后扫描产物，一旦出现 `NEXT_PUBLIC_API_KEY` 或字面量密钥就失败。
+
+注意 `localStorage` 对同源脚本可读，一次 XSS 即可窃取，因此该密钥不应被视为高价值凭据。面向多人或公网部署时，应改为由后端签发 httpOnly Cookie 会话。
+
+## 部署
+
+生产镜像不挂载源码、不以 root 运行、从 `requirements.lock` 安装，并带就绪探针（探针会真正往返数据库，而不是只判断进程存活）：
+
+```powershell
+$env:POSTGRES_PASSWORD = "<一串足够长的口令>"
+docker compose --profile prod up --build
+```
+
+开发栈（挂载源码、开启 reload）：
 
 ```powershell
 docker compose up --build
 ```
 
-配置项见 `.env.example`，它覆盖了全部可用环境变量及其含义。
+`POSTGRES_PASSWORD` 没有默认值，未设置时 compose 会直接拒绝启动，避免把可用口令写进仓库。
+
+配置项见 `.env.example`，它覆盖了全部可用环境变量及其含义；`tests/unit/test_env_example.py` 会在两个方向上校验它与 `Settings` 保持同步。
 
 ## 测试
 
@@ -96,11 +134,22 @@ docker compose up --build
 ```powershell
 pytest -q
 ruff check .
+ruff format --check .
 python -m compileall -q apps/api/src
 
 # Alembic（PowerShell）
 $env:DATABASE_URL='sqlite:///./travel_alembic.db'
 alembic upgrade head
+```
+
+前端：
+
+```powershell
+cd apps/web
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
 
 真实网络端到端测试默认跳过，需要显式开启。它们会真的请求上述社区服务：
@@ -111,6 +160,18 @@ python -m pytest tests/integration/test_free_providers_live.py -q -s
 ```
 
 这些测试断言真实数据可用，并且**不会出现被编造的事实**：步行速度必须在物理合理区间、不得出现凭空的房价、总预算不得为 0。
+
+## CI
+
+`.github/workflows/ci.yml` 分三个作业：
+
+| 作业 | 内容 |
+|---|---|
+| API | `ruff check`、`ruff format --check`、`pytest` |
+| Migrations | `alembic upgrade head` → `downgrade base` → `upgrade head`，再用 autogenerate 断言模型与迁移无漂移 |
+| Web | `tsc --noEmit`、`next lint`、`vitest`、`next build`，并扫描产物确认没有密钥被内联 |
+
+依赖从 `requirements.lock` 与 `apps/web/package-lock.json` 安装，因此 CI 与本地解析到同一组版本。
 
 ## 设计原则
 

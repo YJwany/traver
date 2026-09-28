@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+import { ApiError, apiRequest } from "./api-client";
+
 type AnyRecord = Record<string, any>;
 type Message = { id: string; role: "user" | "assistant" | "tool" | "system"; content: string; tool_name?: string | null };
 
@@ -22,9 +23,26 @@ export type TripStore = {
   revision: AnyRecord | null;
   lastResult: AnyRecord | null;
   error: string;
+  /** True when the failure was 401/403, i.e. the fix is credentials. */
+  needsCredentials: boolean;
   reload: () => Promise<void>;
   send: (message: string) => Promise<AnyRecord>;
 };
+
+function messageFor(reason: unknown, fallback: string): string {
+  if (reason instanceof ApiError) {
+    if (reason.status === 0) return `${fallback}：无法连接 API（${reason.detail}）`;
+    if (reason.isUnauthorized) return "需要 API Key：请在页面顶部填入有效的密钥。";
+    if (reason.isForbidden) return "当前 API Key 没有执行该操作的权限。";
+    if (reason.isRateLimited) return "请求过于频繁，请稍后重试。";
+    return reason.detail || fallback;
+  }
+  return reason instanceof Error ? reason.message : fallback;
+}
+
+function isCredentialFailure(reason: unknown): boolean {
+  return reason instanceof ApiError && (reason.isUnauthorized || reason.isForbidden);
+}
 
 export function useTripStore(tripId: string): TripStore {
   const [trip, setTrip] = useState<AnyRecord | null>(null);
@@ -34,41 +52,75 @@ export function useTripStore(tripId: string): TripStore {
   const [busy, setBusy] = useState(false);
   const [lastResult, setLastResult] = useState<AnyRecord | null>(null);
   const [error, setError] = useState("");
+  const [needsCredentials, setNeedsCredentials] = useState(false);
 
   const reload = useCallback(async () => {
-    const [tripResponse, conversationResponse, attributionResponse] = await Promise.all([
-      fetch(`${API_URL}/api/v1/trips/${tripId}`),
-      fetch(`${API_URL}/api/v1/trips/${tripId}/conversation`),
-      fetch(`${API_URL}/api/v1/providers/attributions`),
+    // The trip is required; the conversation and attribution list are not, so a
+    // failure there must not blank out a workspace that otherwise loaded fine.
+    // `allSettled` is what keeps that distinction, rather than a shared catch.
+    const [tripResult, conversationResult, attributionResult] = await Promise.allSettled([
+      apiRequest<AnyRecord>(`/api/v1/trips/${tripId}`),
+      apiRequest<Message[]>(`/api/v1/trips/${tripId}/conversation`),
+      apiRequest<Attribution[]>("/api/v1/providers/attributions"),
     ]);
-    if (!tripResponse.ok) throw new Error("旅行加载失败");
-    setTrip(await tripResponse.json());
-    if (conversationResponse.ok) setMessages(await conversationResponse.json());
+
+    if (tripResult.status === "rejected") throw tripResult.reason;
+    setTrip(tripResult.value);
+
+    if (conversationResult.status === "fulfilled") setMessages(conversationResult.value);
     // A missing attribution list must not break the workspace, but it must also
     // not be silently dropped when it is present.
-    if (attributionResponse.ok) setAttributions(await attributionResponse.json());
+    if (attributionResult.status === "fulfilled") setAttributions(attributionResult.value);
   }, [tripId]);
 
   useEffect(() => {
-    reload().catch((reason) => setError(reason instanceof Error ? reason.message : "旅行加载失败")).finally(() => setLoading(false));
+    reload()
+      .then(() => {
+        setError("");
+        setNeedsCredentials(false);
+      })
+      .catch((reason) => {
+        setError(messageFor(reason, "旅行加载失败"));
+        setNeedsCredentials(isCredentialFailure(reason));
+      })
+      .finally(() => setLoading(false));
   }, [reload]);
 
   async function send(message: string) {
-    setBusy(true); setError("");
+    setBusy(true);
+    setError("");
     try {
-      const response = await fetch(`${API_URL}/api/v1/ai/chat`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trip_id: tripId, message }),
+      const result = await apiRequest<AnyRecord>("/api/v1/ai/chat", {
+        method: "POST",
+        body: { trip_id: tripId, message },
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail ?? "AI 请求失败");
       setLastResult(result);
       await reload();
       return result;
     } catch (reason) {
-      const messageText = reason instanceof Error ? reason.message : "AI 请求失败";
-      setError(messageText); throw reason;
-    } finally { setBusy(false); }
+      setError(messageFor(reason, "AI 请求失败"));
+      setNeedsCredentials(isCredentialFailure(reason));
+      throw reason;
+    } finally {
+      setBusy(false);
+    }
   }
 
-  return { trip, budget: trip?.budget ?? null, itinerary: trip?.itinerary ?? null, sources: trip?.preview?.source_references ?? [], weather: trip?.preview?.weather ?? null, attributions, messages, loading, busy, revision: trip?.change_history?.at(-1) ?? null, lastResult, error, reload, send };
+  return {
+    trip,
+    budget: trip?.budget ?? null,
+    itinerary: trip?.itinerary ?? null,
+    sources: trip?.preview?.source_references ?? [],
+    weather: trip?.preview?.weather ?? null,
+    attributions,
+    messages,
+    loading,
+    busy,
+    revision: trip?.change_history?.at(-1) ?? null,
+    lastResult,
+    error,
+    needsCredentials,
+    reload,
+    send,
+  };
 }

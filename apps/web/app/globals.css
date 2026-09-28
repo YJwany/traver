@@ -135,5 +135,14 @@ button { cursor: pointer; }
 .attribution a { color: var(--blue); text-decoration: none; }
 .attribution a:hover { text-decoration: underline; }
 .attribution-list { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 5px; }
+/* API key settings: the key is entered once and rarely revisited, so the form is
+   compact and the affordances are secondary rather than competing with the
+   planning UI. */
+.api-key-card { max-width: 900px; padding: 24px; }
+.api-key-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.api-key-form { display: grid; gap: 10px; }
+.api-key-form label { font-weight: 700; font-size: 13px; }
+.api-key-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.api-key-card code { background: var(--paper); border: 1px solid var(--line); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
 @media (max-width: 960px) { .home-hero, .workspace-grid { grid-template-columns: 1fr; } .home-panel { min-height: 270px; } .lower-grid, .principles { grid-template-columns: 1fr 1fr; } .map { min-height: 360px; } }
 @media (max-width: 620px) { .shell, .chat-inner { width: min(100% - 28px, 1440px); } .nav { gap: 12px; } .home { padding-top: 24px; } .home h1 { font-size: 58px; } .home-hero { min-height: auto; padding: 30px 0 60px; gap: 28px; } .principles, .lower-grid { grid-template-columns: 1fr; } .trip-header { align-items: start; flex-direction: column; } .budget-head { text-align: left; } .chat-inner { grid-template-columns: 1fr; } .chat-inner .button { width: 100%; } }

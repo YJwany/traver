@@ -8,7 +8,7 @@ export default function Home() {
           <span className="brand-mark" aria-hidden="true" />
           travel / workspace
         </Link>
-        <nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link></nav>
+        <nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link><Link href="/settings">设置</Link></nav>
       </header>
       <section className="home-hero">
         <div>

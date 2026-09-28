@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -91,7 +91,7 @@ jobs:
           fi
 
   web:
-    name: Web (typecheck + lint + build)
+    name: Web (typecheck + lint + test + build)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -103,7 +103,26 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
+      # `npm ci` requires the lock file to be in sync with package.json, so a
+      # dependency added without committing the lock fails here rather than
+      # silently resolving a different tree than a developer has.
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx next lint
+      - run: npm test
       - run: npx next build
+
+      - name: No secret in the client bundle
+        working-directory: apps/web
+        run: |
+          # `NEXT_PUBLIC_*` values are inlined into the client bundle at build
+          # time, so putting an API key there would publish it to every visitor
+          # while looking like configuration. The key is entered at runtime and
+          # kept in localStorage instead (see apps/web/lib/auth.ts). This fails
+          # the build if that ever regresses.
+          if grep -rqE 'NEXT_PUBLIC_API_KEY|trv_[A-Za-z0-9_-]{16,}' .next/static; then
+            echo "A credential appears in the client bundle:"
+            grep -rlE 'NEXT_PUBLIC_API_KEY|trv_[A-Za-z0-9_-]{16,}' .next/static
+            exit 1
+          fi
+          echo "No NEXT_PUBLIC_API_KEY and no literal trv_ key in .next/static"

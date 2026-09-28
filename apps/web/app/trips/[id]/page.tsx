@@ -94,16 +94,23 @@ function SourceChip({ source, estimated = false }: { source?: AnyRecord; estimat
 }
 
 export default function TripWorkspacePage({ params }: { params: { id: string } }) {
-  const { trip, messages, loading, busy, error, lastResult, weather, attributions, send } = useTripStore(params.id);
+  const { trip, messages, loading, busy, error, lastResult, weather, attributions, needsCredentials, send } = useTripStore(params.id);
   const [input, setInput] = useState("");
   async function submit(event: FormEvent) { event.preventDefault(); if (!input.trim()) return; const message = input; setInput(""); try { await send(message); } catch { /* store keeps the visible error state */ } }
   const selectedOffer = useMemo(() => trip?.preview?.hotel_offers?.find((offer: AnyRecord) => offer.id === trip.selected_hotel_offer_id), [trip]);
   if (loading) return <main className="shell page"><div className="loading">正在打开旅行工作区…</div></main>;
-  if (error && !trip) return <main className="shell page"><div className="error">{error}</div><Link className="button secondary" href="/trips" style={{ marginTop: 18 }}>返回旅行列表</Link></main>;
+  if (error && !trip) return <main className="shell page">
+    <div className="error">{error}</div>
+    {needsCredentials && <p className="muted" style={{ marginTop: 12 }}>行程按属主隔离：服务端启用认证时，只有创建它的 API Key 能读取。</p>}
+    <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+      {needsCredentials && <Link className="button" href="/settings">前往设置填入 API Key</Link>}
+      <Link className="button secondary" href="/trips">返回旅行列表</Link>
+    </div>
+  </main>;
   if (!trip) return null;
   const budget = trip.budget; const sources = trip.preview?.source_references ?? [];
   return <main className="shell page">
-    <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link></nav></header>
+    <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link><Link href="/settings">设置</Link></nav></header>
     <section className="trip-header"><div><div className="eyebrow">TRIP / VERSION {trip.current_version}</div><h1>{trip.profile.destination}</h1><div className="trip-meta"><span>{trip.profile.start_date} — {trip.profile.end_date}</span><span>{trip.profile.travelers} 位旅行者</span><span>{trip.profile.pace === "relaxed" ? "轻松节奏" : "平衡节奏"}</span></div></div><div className="budget-head"><strong>{formatMoney(budget?.total)} <span>/ {formatMoney(budget?.budget_limit)}</span></strong><span>{budget?.over_budget ? "已超预算" : `剩余 ${formatMoney(budget?.remaining)}`}</span></div></section>
     {error && <div className="error" style={{ marginTop: 18 }}>{error}</div>}
     {lastResult?.change && <section className="diff"><h3>已保存 Version {lastResult.version} · 本次修改</h3><p>动作：{lastResult.change.action}</p><p>预算影响：{lastResult.change.impact?.difference ? `${lastResult.change.impact.difference}（程序计算）` : "已重新计算"}</p><p>所有变化均来自结构化 Revision 与 Change History。</p></section>}
