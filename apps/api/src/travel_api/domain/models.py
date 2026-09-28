@@ -214,6 +214,62 @@ class Location(BaseModel):
     source_reference_id: str | None = None
 
 
+class FieldClaim(BaseModel):
+    """One source's assertion about one field of one place.
+
+    Kept per-source rather than collapsed into a single value because the collapse is
+    where information is lost. If two sources report different ticket prices, the merge
+    has to keep *something* to show, but a reader who sees a number with two sources
+    attached will reasonably conclude both agree — so the discarded claim has to be
+    recoverable somewhere, and this is that place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    source_id: str
+    #: How the value reads to a person, e.g. ``¥60`` or ``4.5 分``.
+    value_text: str
+    #: Whether this claim is something we computed rather than something a source stated.
+    #: Tracked separately because a derived value is not evidence, so it must never be
+    #: preferred over a real report just for being newer.
+    is_estimate: bool = False
+    observed_at: datetime
+    fetched_at: datetime
+
+
+class FieldDisagreement(BaseModel):
+    """Two or more sources asserting different values for the same field.
+
+    Present only when the values actually differ. ``claims`` is every claim seen, not
+    just the losing ones, because "three sources, two say ¥60 and one says ¥80" and "two
+    sources, ¥60 and ¥80" are different situations and a reader can tell them apart only
+    if all of them are listed.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str
+    claims: list[FieldClaim]
+    #: The claim whose value the entity kept, so the shown number is attributable.
+    chosen_source: str | None = None
+    #: How that retained value reads, so a reader can match it to the field on screen
+    #: without re-deriving the rendering rule.
+    chosen_value_text: str = ""
+    #: Why that one, in words. An unexplained tie-break is indistinguishable from a
+    #: silent arbitrary pick.
+    chosen_reason: str = ""
+
+    @property
+    def disputed_values(self) -> list[str]:
+        """The distinct values, first-seen order."""
+        seen: list[str] = []
+        for claim in self.claims:
+            if claim.value_text not in seen:
+                seen.append(claim.value_text)
+        return seen
+
+
 class Hotel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -225,6 +281,9 @@ class Hotel(BaseModel):
     review_count: int | None = Field(default=None, ge=0)
     brand: str | None = None
     source_references: list[SourceReference] = Field(default_factory=list)
+    #: Fields where the merged sources disagreed. Empty means every source that spoke
+    #: agreed — or only one spoke — so an empty list must not be read as "verified".
+    disagreements: list[FieldDisagreement] = Field(default_factory=list)
 
 
 class HotelRoomType(BaseModel):
@@ -296,6 +355,8 @@ class Restaurant(BaseModel):
     average_cost: Money | None = None
     cuisine: list[str] = Field(default_factory=list)
     source_references: list[SourceReference] = Field(default_factory=list)
+    #: Fields where the merged sources disagreed; see :class:`FieldDisagreement`.
+    disagreements: list[FieldDisagreement] = Field(default_factory=list)
 
 
 class Attraction(BaseModel):
@@ -316,6 +377,8 @@ class Attraction(BaseModel):
     description: str | None = None
     wikipedia_url: str | None = None
     source_references: list[SourceReference] = Field(default_factory=list)
+    #: Fields where the merged sources disagreed; see :class:`FieldDisagreement`.
+    disagreements: list[FieldDisagreement] = Field(default_factory=list)
 
 
 class RoutePoint(BaseModel):

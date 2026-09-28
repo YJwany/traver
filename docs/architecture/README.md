@@ -56,5 +56,8 @@ Traver 本身不提供数据，也不绑定模型。这两件事都由使用者�
 - [provider-system.md](provider-system.md) — Provider 清单与能力矩阵：有哪些来源、解锁了什么、还差什么。
 - [credentials.md](credentials.md) — 凭据保险箱：加密可逆、按属主隔离、环境变量作兜底、界面保存免重启。
 - [realtime-data.md](realtime-data.md) — 时效性硬约束：面向未来的攻略只能用近期数据。
+- [cross-source-validation.md](cross-source-validation.md) — 多源交叉验证：来源说法不一致时如实记录，而不是把分歧伪装成共识。
+- [routing.md](routing.md) — 路线：距离属于道路、时长属于交通方式、覆盖范围属于工具，三者分开交代。
+- [planning-jobs.md](planning-jobs.md) — 异步任务与进度推送：步骤由服务端上报，未完成的步骤不能报完成。
 
 设计原则是**渐进增强**：0 配置必须可用（免密钥数据源 + 本地确定性规划器），每接入一个源就解锁一批能力。不存在"必须先填 5 个 Key 才有输出"的情况。
