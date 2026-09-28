@@ -208,3 +208,26 @@ button { cursor: pointer; }
 .credential-help a:hover { text-decoration: underline; }
 @media (max-width: 960px) { .home-hero, .workspace-grid { grid-template-columns: 1fr; } .home-panel { min-height: 270px; } .lower-grid, .principles { grid-template-columns: 1fr 1fr; } .map { min-height: 360px; } .unlock-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .shell, .chat-inner { width: min(100% - 28px, 1440px); } .nav { gap: 12px; } .home { padding-top: 24px; } .home h1 { font-size: 58px; } .home-hero { min-height: auto; padding: 30px 0 60px; gap: 28px; } .principles, .lower-grid { grid-template-columns: 1fr; } .trip-header { align-items: start; flex-direction: column; } .budget-head { text-align: left; } .chat-inner { grid-template-columns: 1fr; } .chat-inner .button { width: 100%; } .provider-grid { grid-template-columns: 1fr; } .capability-item { grid-template-columns: 14px 1fr; } .capability-source { grid-column: 2; } }
+
+/* -- content ingestion ----------------------------------------------------
+   The extraction screen's job is to let a reading be checked, so these styles
+   are mostly about making the quote from the source visible next to the fact
+   derived from it, and about keeping the three confidence tones distinct. */
+.ingestion-card { padding: 20px; display: grid; gap: 12px; align-content: start; }
+.fact-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 12px; }
+.fact-row { border-left: 3px solid var(--line-strong); padding: 8px 0 8px 12px; }
+.fact-caution { border-left-color: var(--amber); }
+.fact-fact { border-left-color: var(--green); }
+.fact-mention { border-left-color: var(--blue); }
+.fact-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fact-head .status-chip { margin-top: 0; }
+.fact-text { font-size: 13px; }
+/* The evidence quote. Monospaced-ish indent and a rule on the left, so it reads as
+   "this is what the source said" rather than as more of our own prose. */
+.fact-evidence { margin: 6px 0 4px; padding: 6px 10px; border-left: 2px solid var(--line-strong); background: var(--paper); color: var(--muted); font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
+.claim-fact { color: var(--green); background: var(--green-soft); }
+.claim-caution { color: var(--amber); background: var(--amber-soft); }
+.claim-mention { color: var(--blue); background: var(--blue-soft); }
+/* The verbatim source, scrollable: a pasted page can be tens of thousands of
+   characters and must not push the rest of the screen off the fold. */
+.ingestion-source { max-height: 240px; overflow: auto; margin: 8px 0 0; padding: 10px 12px; background: var(--paper); border: 1px solid var(--line); font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }

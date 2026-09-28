@@ -267,6 +267,27 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         ),
     ),
     ProviderManifest(
+        id="user-content",
+        label="你自己提供的内容（小红书 / 抖音 / 美团 / 携程 / 同程等）",
+        kind="content",
+        status=STATUS_AVAILABLE,
+        capabilities=(),
+        provider_names=(),
+        # No ``activation_keys``: there is nothing to configure. The path works the
+        # moment the process runs, which is what `_is_active` falls through to.
+        cost_note="免费。由你自己的浏览器读取你已登录的页面，Traver 不抓取也不代你登录",
+        freshness_note="按内容自身的发布时间判断；页面没写时间时如实标注为「发布时间未知」，不当作最新内容",
+        docs_url="",
+        caveats=(
+            "这些平台都没有公开 API。Traver 不会抓取它们，也不保存你的登录态",
+            "方式是用浏览器书签（小工具）在你自己的浏览器里读取当前页面，或直接把正文粘贴进来",
+            "提取是规则式的：价格、时长、开放/闭馆时间、提示、警告、地名，每条都附上原文出处",
+            "提取出来的是「某人说的」，不是测量值：它只以估算和提示的形式进入行程，"
+            "绝不会覆盖高德的实测路线或报价",
+            "地名只有在地理编码成功后才能进入路线；没有坐标时只作为「文中提到的地点」列出",
+        ),
+    ),
+    ProviderManifest(
         id="openai-compatible",
         label="AI 模型（OpenAI 兼容接口）",
         kind="ai",

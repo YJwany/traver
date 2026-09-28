@@ -59,6 +59,107 @@ def _audit_entry(operation: str, result: ProviderResult) -> dict:
     }
 
 
+#: Note kinds that read as a caution rather than a suggestion. Ordered so a warning is
+#: never downgraded to a tip by a later match.
+_CAUTION_KINDS = ("warning", "opening_hours")
+
+
+def _build_ingested_notes(
+    ingestions,
+    *,
+    hotels: list[Hotel],
+    restaurants: list[Restaurant],
+    attractions: list[Attraction],
+) -> list[dict]:
+    """Attach the traveller's own notes to the entities they are about.
+
+    Two decisions here are worth stating.
+
+    **Notes are matched, never merged.** A note's place name is compared against the
+    entities already aggregated from structured sources; a match attaches an advisory
+    note to that entity. The entity's own fields are left untouched. Ingested content is
+    somebody's account of a trip — a remembered price, an impression of how long to
+    stay — so letting it overwrite a measured value would launder an opinion into a fact.
+    That is the same rule the budget layer follows for estimates.
+
+    **An unmatched mention is still reported.** A place the source recommended and that
+    our structured sources do not have is genuinely interesting: it is a gap in the data,
+    and hiding it would make the note look fully used. It is listed with
+    ``matched`` false so a reader can see the plan did not act on it and why — the place
+    has no coordinates, so it cannot be routed.
+    """
+    if not ingestions:
+        return []
+
+    # Names to match against, longest first so 「灵隐寺」 is preferred over a shorter
+    # substring of it that another entity happens to share.
+    candidates: list[tuple[str, str, str]] = []
+    for entity, kind in (
+        *((hotel, "hotel") for hotel in hotels),
+        *((restaurant, "restaurant") for restaurant in restaurants),
+        *((attraction, "attraction") for attraction in attractions),
+    ):
+        name = getattr(entity, "canonical_name", None)
+        if name:
+            candidates.append((name, str(entity.id), kind))
+    candidates.sort(key=lambda item: len(item[0]), reverse=True)
+
+    notes: list[dict] = []
+    for ingestion in ingestions:
+        for fact in ingestion.facts:
+            # One matching rule for every kind of fact, applied in two passes.
+            #
+            # Checking the *evidence sentence* for an entity name matters more than it
+            # looks. Restricting matching to extracted place names meant a note saying
+            # 「住成都天际酒店」 never attached to that hotel, because 酒店 is not a place
+            # suffix the extractor recognises — the name was right there in the sentence
+            # the whole time. So the sentence is checked first, and the extracted place
+            # name is the fallback for when the note names somewhere we recorded under a
+            # longer or shorter form.
+            place = str(fact.value.get("name") or "") if fact.kind.value == "place_mention" else ""
+            matched_name = matched_id = matched_kind = None
+            for name, entity_id, kind in candidates:
+                if name in fact.evidence:
+                    matched_name, matched_id, matched_kind = name, entity_id, kind
+                    break
+            if matched_name is None and place:
+                for name, entity_id, kind in candidates:
+                    if place in name or name in place:
+                        matched_name, matched_id, matched_kind = name, entity_id, kind
+                        break
+
+            notes.append(
+                {
+                    "ingestion_id": ingestion.id,
+                    "platform": ingestion.platform_label,
+                    "url": ingestion.url,
+                    "title": ingestion.title,
+                    "author": ingestion.author,
+                    "kind": fact.kind.value,
+                    "text": fact.text,
+                    "evidence": fact.evidence,
+                    "confidence": fact.confidence.value,
+                    "reason": fact.reason,
+                    #: Reported so the UI can say how old the advice is, or that its age
+                    #: is unknown. Never omitted: an undated note and a dated one look
+                    #: identical otherwise.
+                    "published_at": (
+                        ingestion.published_at.isoformat() if ingestion.published_at else None
+                    ),
+                    "ingested_at": ingestion.ingested_at.isoformat(),
+                    "data_age_is_known": ingestion.published_at is not None,
+                    "matched": matched_name is not None,
+                    "matched_entity_id": matched_id,
+                    "matched_entity_name": matched_name,
+                    "matched_entity_kind": matched_kind,
+                }
+            )
+    # Cautions first, so a closed-day note is not buried under a dozen tips; then by how
+    # confident the reading was.
+    notes.sort(key=lambda item: (item["kind"] not in _CAUTION_KINDS, item["kind"], item["text"]))
+    return notes
+
+
 async def _safe_call(registry: ProviderRegistry, provider, method: str, *args) -> ProviderResult:
     try:
         return await registry.call(provider, method, *args)
@@ -158,6 +259,7 @@ async def build_preview(
     budget_strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
     budget_engine: BudgetEngine | None = None,
     freshness_service: FreshnessService | None = None,
+    ingestions=None,
 ) -> TripPreview:
     (
         hotel_results,
@@ -293,6 +395,24 @@ async def build_preview(
     # stamp the data.
     freshness = freshness_service or FreshnessService()
     stale_facts = freshness.stale_facts(typed_refs)
+
+    # The traveller's own notes are matched against the entities just aggregated, so a
+    # pasted 小红书 note lands next to the place it is about instead of in a separate
+    # list the reader has to reconcile by hand.
+    ingested = list(ingestions or [])
+    ingested_notes = _build_ingested_notes(
+        ingested, hotels=hotels, restaurants=restaurants, attractions=attractions
+    )
+    # Their references join the plan's citations. An ingested note is a source like any
+    # other, and one that is not cited is one whose origin cannot be checked.
+    content_refs = [item.source_reference() for item in ingested]
+    refs = [*refs, *content_refs]
+    typed_refs += [("user_content", ref) for ref in content_refs]
+    # Judged again now that the notes are included: an undated note is reported as
+    # age-unknown, and a dated-but-old one as too old, without either being treated as
+    # current merely because the traveller supplied it.
+    stale_facts = freshness.stale_facts(typed_refs)
+
     provider_audit = (
         [_audit_entry("search_hotels", result) for result in hotel_results]
         + [_audit_entry("search_room_offers", result) for result in offer_results]
@@ -319,5 +439,6 @@ async def build_preview(
         provider_audit=provider_audit,
         source_references=refs,
         stale_facts=stale_facts,
+        ingested_notes=ingested_notes,
         generated_at=datetime.now(timezone.utc),
     )

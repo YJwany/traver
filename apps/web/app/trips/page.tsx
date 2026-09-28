@@ -46,7 +46,7 @@ export default function TripsPage() {
 
   return (
     <main className="shell page">
-      <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips/new">新建旅行</Link><Link href="/settings">设置</Link></nav></header>
+      <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips/new">新建旅行</Link><Link href="/ingestions">内容摄取</Link><Link href="/settings">设置</Link></nav></header>
       <div className="page-header"><div><div className="eyebrow">TRIPS / PERSISTED WORKSPACE</div><h1>我的旅行</h1></div><Link className="button" href="/trips/new">新建旅行 →</Link></div>
       {error && (
         <div className="error">

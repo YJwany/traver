@@ -60,6 +60,7 @@ export default function SettingsPage() {
         <nav className="nav">
           <Link href="/trips">我的旅行</Link>
           <Link href="/trips/new">新建旅行</Link>
+          <Link href="/ingestions">内容摄取</Link>
         </nav>
       </header>
 

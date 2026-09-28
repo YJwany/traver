@@ -9,6 +9,7 @@ from travel_api.db.repositories import (
     ApiKeyRepository,
     AttractionRepository,
     BudgetRepository,
+    ContentIngestionRepository,
     ConversationRepository,
     CredentialRepository,
     DecisionRepository,
@@ -52,6 +53,7 @@ class UnitOfWork(AbstractContextManager["UnitOfWork"]):
         self.conversations = ConversationRepository(self.session)
         self.api_keys = ApiKeyRepository(self.session)
         self.credentials = CredentialRepository(self.session)
+        self.ingestions = ContentIngestionRepository(self.session)
         return self
 
     def commit(self) -> None:

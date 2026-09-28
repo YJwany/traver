@@ -655,6 +655,15 @@ class TripPreview(BaseModel):
     #: worse than a missing one: it looks like knowledge. Empty is the normal case,
     #: and an empty list means every contributing fact was within its horizon.
     stale_facts: list[dict[str, Any]] = Field(default_factory=list)
+    #: Advice the traveller supplied themselves — a pasted 小红书 note, a 大众点评 review —
+    #: matched against the entities in this plan.
+    #:
+    #: Advisory only, and the shape says so: each entry records which entity it matched,
+    #: the sentence it came from, and where it was published. Ingested text is somebody's
+    #: account of a trip, not a measurement, so it is never merged into an entity's own
+    #: fields — a remembered price must not stand in for a quoted rate, and a blogger's
+    #: "2 hours is enough" must not overwrite a measured visit duration.
+    ingested_notes: list[dict[str, Any]] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

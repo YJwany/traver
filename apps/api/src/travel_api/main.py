@@ -32,6 +32,7 @@ from travel_api.providers.registry import ProviderRegistry
 from travel_api.providers.resilience import ProviderCallPolicy, ProviderRuntime
 from travel_api.services.auth import KEY_PREFIX, AuthenticationError, AuthService, hash_api_key
 from travel_api.services.budget_engine import BudgetEngine
+from travel_api.services.content_service import ContentIngestionService
 from travel_api.services.credentials import (
     CredentialCipher,
     CredentialResolver,
@@ -178,6 +179,10 @@ def create_app(
         app.state.settings = app_settings
         app.state.database = database
         app.state.provider_registry = registry
+        # Constructed before the trip service, because planning reads the caller's own
+        # saved notes: a note the traveller supplied is one of the plan's sources.
+        ingestion_service = ContentIngestionService(lambda: UnitOfWork(database.session_factory))
+        app.state.ingestion_service = ingestion_service
         app.state.trip_service = TripService(
             provider_registry=registry,
             uow_factory=lambda: UnitOfWork(database.session_factory),
@@ -192,6 +197,7 @@ def create_app(
                     route=app_settings.freshness_route,
                 )
             ),
+            content_service=ingestion_service,
         )
         app.state.tool_registry = build_default_tool_registry(app.state.trip_service)
 

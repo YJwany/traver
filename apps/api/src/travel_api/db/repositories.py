@@ -13,6 +13,7 @@ from travel_api.db.models import (
     AIToolCallRecord,
     ApiKeyRecord,
     AttractionRecord,
+    ContentIngestionRecord,
     ConversationMessageRecord,
     CredentialRecord,
     DecisionScoreRecord,
@@ -33,6 +34,12 @@ from travel_api.db.models import (
     TripProfileRecord,
     TripRecord,
 )
+from travel_api.domain.ingestion import (
+    ContentPlatform,
+    ExtractedFact,
+    Ingestion,
+    platform_label_for,
+)
 from travel_api.domain.models import (
     Attraction,
     BudgetBreakdown,
@@ -50,6 +57,19 @@ from travel_api.domain.models import (
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Attach UTC to a naive datetime read back from the database.
+
+    SQLite drops tzinfo on round-trip, so a stored aware timestamp comes back naive. A
+    naive value compared against an aware one raises, and one silently treated as local
+    time would shift the age of a datum by the server's offset — which for a freshness
+    judgement is a wrong answer, not a rounding error.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def source_key(reference: SourceReference) -> str:
@@ -822,3 +842,83 @@ class CredentialRepository:
         )
         self.session.flush()
         return int(result.rowcount or 0)
+
+
+class ContentIngestionRepository:
+    """Stored user-supplied content, always scoped to one owner.
+
+    Every read filters on ``owner_id``. This is not a nicety: the text is something a
+    person chose to save, and a deployment serving several people must not let one read
+    another's saved notes — nor the URLs they were reading.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def create(self, ingestion: Ingestion) -> ContentIngestionRecord:
+        record = ContentIngestionRecord(
+            id=UUID(ingestion.id),
+            owner_id=ingestion.owner_id or "",
+            platform=str(ingestion.platform),
+            url=ingestion.url,
+            title=ingestion.title,
+            author=ingestion.author,
+            content_text=ingestion.content_text,
+            ingested_at=ingestion.ingested_at,
+            published_at=ingestion.published_at,
+            facts_json=[fact.model_dump(mode="json") for fact in ingestion.facts],
+            notes_json=list(ingestion.notes),
+        )
+        self.session.add(record)
+        self.session.flush()
+        return record
+
+    @staticmethod
+    def _to_domain(record: ContentIngestionRecord) -> Ingestion:
+        return Ingestion(
+            id=str(record.id),
+            owner_id=record.owner_id or None,
+            platform=ContentPlatform(record.platform),
+            platform_label=platform_label_for(ContentPlatform(record.platform)),
+            url=record.url,
+            title=record.title,
+            author=record.author,
+            content_text=record.content_text,
+            ingested_at=_as_utc(record.ingested_at),
+            published_at=_as_utc(record.published_at) if record.published_at else None,
+            facts=[ExtractedFact.model_validate(item) for item in (record.facts_json or [])],
+            input_chars=len(record.content_text or ""),
+            notes=list(record.notes_json or []),
+        )
+
+    def get(self, ingestion_id: UUID, *, owner_id: str | None = None) -> Ingestion | None:
+        statement = select(ContentIngestionRecord).where(ContentIngestionRecord.id == ingestion_id)
+        # `None` means "no scoping requested" (an unauthenticated deployment); an empty
+        # string is a real owner and must still filter, or every anonymous user would
+        # see every other anonymous user's notes.
+        if owner_id is not None:
+            statement = statement.where(ContentIngestionRecord.owner_id == owner_id)
+        record = self.session.scalars(statement).first()
+        return self._to_domain(record) if record else None
+
+    def list_for_owner(self, owner_id: str | None, *, limit: int = 50) -> list[Ingestion]:
+        statement = select(ContentIngestionRecord)
+        if owner_id is not None:
+            statement = statement.where(ContentIngestionRecord.owner_id == owner_id)
+        # Newest first: a note is usually re-used shortly after it is saved, and an
+        # unbounded list would eventually be a page of scrolling.
+        statement = statement.order_by(ContentIngestionRecord.ingested_at.desc()).limit(limit)
+        return [self._to_domain(record) for record in self.session.scalars(statement).all()]
+
+    def delete(self, ingestion_id: UUID, *, owner_id: str | None = None) -> bool:
+        statement = select(ContentIngestionRecord).where(ContentIngestionRecord.id == ingestion_id)
+        if owner_id is not None:
+            statement = statement.where(ContentIngestionRecord.owner_id == owner_id)
+        record = self.session.scalars(statement).first()
+        if record is None:
+            # Also the answer when the row exists but belongs to somebody else: telling
+            # a caller that an id exists under another owner would leak its existence.
+            return False
+        self.session.delete(record)
+        self.session.flush()
+        return True

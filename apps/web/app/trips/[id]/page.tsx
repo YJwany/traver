@@ -101,6 +101,50 @@ function HolidayPanel({ holidays }: { holidays: AnyRecord | null }) {
   </div>;
 }
 
+function IngestedNotesPanel({ notes }: { notes: AnyRecord[] }) {
+  // Nothing supplied means nothing to say. An empty panel would imply the feature is
+  // broken rather than unused.
+  if (!notes.length) return null;
+  const cautions = notes.filter((note: AnyRecord) => note.kind === "warning" || note.kind === "opening_hours");
+  return <section className="panel" style={{ marginTop: 18 }}>
+    <div className="panel-heading">
+      <h2>你提供的内容 / your notes</h2>
+      <span className="muted">{notes.length} 条 · {cautions.length} 条需要注意</span>
+    </div>
+    <div className="panel-body">
+      {notes.map((note: AnyRecord, index: number) => <div className="entity-card" key={`${note.ingestion_id}:${index}`}>
+        <div className="entity-title">
+          <span>
+            {note.matched
+              ? <>已关联到 <strong>{note.matched_entity_name}</strong></>
+              : note.kind === "place_mention"
+                ? "文中提到，但本系统没有这个地点"
+                : "未关联到具体地点"}
+          </span>
+          <span className={note.kind === "warning" || note.kind === "opening_hours" ? "status-chip status-stale" : "status-chip status-estimated"}>
+            {note.kind}
+          </span>
+        </div>
+        <div className="entity-meta">{note.text}</div>
+        <blockquote className="fact-evidence">{note.evidence}</blockquote>
+        <div className="entity-meta">
+          {/* Both times, and "the page did not say" is stated rather than left blank. */}
+          {note.published_at
+            ? `原文发布于 ${note.published_at.slice(0, 10)}`
+            : `原文未标注发布时间 · 抓取于 ${formatTimestamp(note.ingested_at)}`}
+          {" · "}{note.platform}
+          {note.url ? <> · <a href={note.url} target="_blank" rel="noreferrer noopener">原文</a></> : null}
+        </div>
+      </div>)}
+      <div className="entity-meta" style={{ marginTop: 10 }}>
+        这些是你自己提供的内容，属于「某人说的」而不是实测值：它们只作为提示与估算参考，
+        不会覆盖高德等来源的实测路线、报价或评分。未关联到具体地点的条目，是因为文中提到的名字
+        还没有坐标，无法进入路线。
+      </div>
+    </div>
+  </section>;
+}
+
 function AttributionFooter({ attributions }: { attributions: Attribution[] }) {
   if (attributions.length === 0) return null;
   return <footer className="attribution">
@@ -134,12 +178,13 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
   if (!trip) return null;
   const budget = trip.budget; const sources = trip.preview?.source_references ?? [];
   return <main className="shell page">
-    <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link><Link href="/settings">设置</Link></nav></header>
+    <header className="topbar"><Link className="brand" href="/"><span className="brand-mark" aria-hidden="true" />travel / workspace</Link><nav className="nav"><Link href="/trips">我的旅行</Link><Link href="/trips/new">新建旅行</Link><Link href="/ingestions">内容摄取</Link><Link href="/settings">设置</Link></nav></header>
     <section className="trip-header"><div><div className="eyebrow">TRIP / VERSION {trip.current_version}</div><h1>{trip.profile.destination}</h1><div className="trip-meta"><span>{trip.profile.start_date} — {trip.profile.end_date}</span><span>{trip.profile.travelers} 位旅行者</span><span>{trip.profile.pace === "relaxed" ? "轻松节奏" : "平衡节奏"}</span></div></div><div className="budget-head"><strong>{formatMoney(budget?.total)} <span>/ {formatMoney(budget?.budget_limit)}</span></strong><span>{budget?.over_budget ? "已超预算" : `剩余 ${formatMoney(budget?.remaining)}`}</span></div></section>
     {error && <div className="error" style={{ marginTop: 18 }}>{error}</div>}
     {lastResult?.change && <section className="diff"><h3>已保存 Version {lastResult.version} · 本次修改</h3><p>动作：{lastResult.change.action}</p><p>预算影响：{lastResult.change.impact?.difference ? `${lastResult.change.impact.difference}（程序计算）` : "已重新计算"}</p><p>所有变化均来自结构化 Revision 与 Change History。</p></section>}
     {lastResult && lastResult.warnings?.length > 0 && <div className="notice" style={{ margin: "18px 0" }}>{lastResult.warnings.join("；")}</div>}
     <StaleFactBanner facts={trip.preview?.stale_facts ?? []} />
+    <IngestedNotesPanel notes={trip.preview?.ingested_notes ?? []} />
     <section className="workspace-grid"><div className="panel"><div className="panel-heading"><h2>行程 / itinerary</h2><span className="muted">{trip.itinerary?.conflicts?.length ?? 0} 个冲突</span></div><div className="panel-body">{trip.itinerary?.days?.map((day: AnyRecord) => <div className="day" key={day.id}><h3>Day {day.day_index} <span className="muted">· {day.day_date}</span></h3>{day.items.length === 0 && <div className="muted">暂无可行项目</div>}{day.items.map((item: AnyRecord) => <div className="itinerary-item" key={item.id}><div className="item-time">{formatTime(item.start_time)}</div><div><div className="item-title">{item.title}</div><div className="item-type">{typeNames[item.item_type] ?? item.item_type} · {item.visit_duration_minutes} 分钟 · 路程 {item.travel_from_previous_minutes} 分钟</div></div></div>)}</div>)}</div></div><div className="panel"><div className="panel-heading"><h2>地图 / route view</h2><span className="muted">路线由 Route Optimizer 计算</span></div><MapPanel trip={trip} /></div></section>
     <section className="lower-grid"><div className="panel"><div className="panel-heading"><h2>酒店 / offers</h2><span className="muted">{trip.preview?.hotels?.length ?? 0} 家 · {trip.preview?.hotel_offers?.length ?? 0} 个报价</span></div><div className="panel-body">{trip.preview?.hotel_offers?.length ? trip.preview.hotel_offers.slice(0, 6).map((offer: AnyRecord) => { const hotel = trip.preview.hotels.find((item: AnyRecord) => item.id === offer.hotel_id); const source = sourceFor(offer); return <div className="entity-card" key={offer.id}><div className="entity-title"><span>{hotel?.canonical_name ?? "Hotel offer"}{offer.id === trip.selected_hotel_offer_id && <span className="source-chip">已选择</span>}</span><span className="money">{formatMoney(offer.total_price)}</span></div><div className="entity-meta">{hotel?.rating ? `评分 ${hotel.rating} · ` : ""}{hotel?.location?.district ?? ""}<br />房型与取消政策保留在 Offer 层</div><SourceChip source={source} /></div>; }) : <div className="empty">免费数据源提供酒店地理与名称事实，但不含房价与库存，因此没有报价。预算中的酒店金额是可配置的估算额度，标记为估算。</div>}</div></div>
       <div className="panel"><div className="panel-heading"><h2>美食 / restaurants</h2><span className="muted">{trip.preview?.restaurants?.length ?? 0} 家</span></div><div className="panel-body">{trip.preview?.restaurants?.slice(0, 8).map((item: AnyRecord) => { const source = sourceFor(item); return <div className="entity-card" key={item.id}><div className="entity-title"><span>{item.canonical_name}</span><span className="money">{formatMoney(item.average_cost?.value)}</span></div><div className="entity-meta">{item.cuisine?.join(" / ") || "餐厅"}{item.rating ? ` · 评分 ${item.rating}` : ""}<br />{item.location?.address}</div><SourceChip source={source} /></div>; })}</div></div>

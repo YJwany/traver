@@ -432,6 +432,38 @@ class CredentialRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ContentIngestionRecord(Base):
+    """Text a traveller supplied from a page they were already reading.
+
+    Owner-scoped like a trip, because a 小红书 note someone saved is theirs and not the
+    deployment's. The raw text is kept so the extracted facts stay auditable: without it
+    a reader could see "人均 80 元" but not check it, which is the difference between a
+    citation and an assertion.
+
+    ``published_at`` is nullable and that null is meaningful — it records that the page
+    did not state a date, which is the common case and must not be rendered as "recent".
+    """
+
+    __tablename__ = "content_ingestions"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    url: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(Text)
+    #: The supplied text, stored verbatim so every extracted fact can be checked.
+    content_text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: When we received it. Always known.
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: The post's own date, when the page stated one. ``None`` means "not stated".
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Extracted facts as JSON. A child table would add a join per note for data that is
+    #: always read whole and never queried by fact.
+    facts_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    notes_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+
+
 def create_engine_from_url(database_url: str):
     kwargs = {"pool_pre_ping": True}
     if database_url.startswith("sqlite"):

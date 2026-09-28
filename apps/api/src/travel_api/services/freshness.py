@@ -35,6 +35,15 @@ MAX_AGE_SECONDS: dict[str, int] = {
     "restaurant": 86400,
     "hotel": 86400,
     "attraction": 86400,
+    # Deliberately absent: ``user_content``.
+    #
+    # A note the traveller supplied is judged by *its own* stated publication date, and
+    # that date can be years old without the note being unusable — a well-written
+    # neighbourhood guide does not expire on a schedule the way a forecast does. What
+    # matters is that the age is *disclosed*, not that some threshold is enforced. Giving
+    # it a horizon here would produce a warning on every genuinely useful old guide,
+    # which is how a reader learns to ignore warnings. Undated notes are still reported
+    # as age-unknown through the normal ``SOURCE_SILENT`` path.
 }
 
 

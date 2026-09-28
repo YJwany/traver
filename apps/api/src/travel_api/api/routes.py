@@ -3,6 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from travel_api.api.dependencies import get_principal, require_read, require_write
+from travel_api.domain.ingestion import IngestionRequest
 from travel_api.domain.models import (
     AIChatRequest,
     AIChatResult,
@@ -527,6 +528,97 @@ async def get_changes(
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return [item.model_dump(mode="json") for item in trip.change_history]
+
+
+# -- user-supplied content -------------------------------------------------
+#
+# The platforms people actually read travel advice on — 小红书, 抖音, 美团, 携程,
+# 同程 — publish no API. Scraping them would violate their terms and hold a
+# traveller's session, so instead the traveller hands over text they can already
+# see: a paste, or a bookmarklet that reads the page in *their* browser and posts
+# the result here. No request is ever made to those hosts by this service.
+
+
+def ingestion_service(request: Request):
+    """The ingestion service, or a 503 when storage is not configured."""
+    service = getattr(request.app.state, "ingestion_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="content ingestion is not configured")
+    return service
+
+
+@router.post("/ingestions", status_code=201, dependencies=[Depends(require_write)])
+async def create_ingestion(
+    payload: IngestionRequest,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> dict:
+    """Read a supplied note and store it, quoting the text behind every fact.
+
+    Returns the extraction rather than just an id, because the interesting question is
+    always "what did you get from it" — and showing the evidence is what lets the
+    traveller disagree with a reading immediately rather than after it reaches a plan.
+    """
+    ingestion = ingestion_service(request).ingest(
+        payload, owner_id=_resolved_owner(request, principal)
+    )
+    return ingestion.model_dump(mode="json")
+
+
+@router.get("/ingestions", dependencies=[Depends(require_read)])
+async def list_ingestions(
+    request: Request,
+    principal: Principal = Depends(get_principal),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[dict]:
+    return [
+        item.model_dump(mode="json")
+        for item in ingestion_service(request).list(
+            owner_id=_resolved_owner(request, principal), limit=limit
+        )
+    ]
+
+
+@router.get("/ingestions/{ingestion_id}", dependencies=[Depends(require_read)])
+async def get_ingestion(
+    ingestion_id: UUID,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> dict:
+    found = ingestion_service(request).get(
+        ingestion_id, owner_id=_resolved_owner(request, principal)
+    )
+    if found is None:
+        # Also the answer for a note owned by somebody else: confirming that an id
+        # exists under another owner would leak its existence.
+        raise HTTPException(status_code=404, detail="ingestion not found")
+    return found.model_dump(mode="json")
+
+
+@router.delete("/ingestions/{ingestion_id}", dependencies=[Depends(require_write)])
+async def delete_ingestion(
+    ingestion_id: UUID,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> dict:
+    deleted = ingestion_service(request).delete(
+        ingestion_id, owner_id=_resolved_owner(request, principal)
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="ingestion not found")
+    return {"deleted": True}
+
+
+@router.get("/content/bookmarklet", dependencies=[Depends(require_read)])
+async def ingestion_bookmarklet(request: Request) -> dict:
+    """The bookmarklet source, generated rather than hard-coded in the Web app.
+
+    Deliberately not under ``/ingestions/``: that prefix has a
+    ``/ingestions/{ingestion_id}`` route, so a sibling literal path would be resolved
+    only because of registration order — a route that works until someone reorders the
+    file. A distinct prefix removes the hazard rather than relying on it.
+    """
+    return ingestion_service(request).bookmarklet(request)
 
 
 @router.post("/ai/chat", response_model=AIChatResult, dependencies=[Depends(require_write)])

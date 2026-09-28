@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -21,6 +22,8 @@ from travel_api.services.budget_engine import BudgetEngine
 from travel_api.services.freshness import FreshnessService
 from travel_api.services.owner_context import resolve_owner
 from travel_api.services.route_optimizer import RouteOptimizer
+
+logger = logging.getLogger(__name__)
 
 
 class TripNotFoundError(LookupError):
@@ -51,11 +54,31 @@ class TripService:
         uow_factory,
         freshness_service: FreshnessService | None = None,
         budget_engine: BudgetEngine | None = None,
+        content_service=None,
     ) -> None:
         self.provider_registry = provider_registry
         self.uow_factory = uow_factory
         self.freshness = freshness_service or FreshnessService()
         self.budget_engine = budget_engine or BudgetEngine()
+        # Optional, so a deployment that never wires ingestion still plans exactly as
+        # before; the notes are an enhancement, not a dependency.
+        self.content_service = content_service
+
+    def _ingestions(self, owner_id: str | None):
+        """The caller's stored notes, or nothing when ingestion is not configured.
+
+        Read fresh on every plan rather than cached, so a note saved a moment ago is
+        reflected immediately and one deleted stops appearing. Errors are swallowed to
+        an empty list on purpose: a traveller's own optional notes must never be able to
+        break trip planning.
+        """
+        if self.content_service is None:
+            return []
+        try:
+            return self.content_service.list(owner_id=resolve_owner(owner_id), limit=100)
+        except Exception as exc:  # noqa: BLE001 - notes are optional, planning is not
+            logger.warning("could not read stored notes: %s", exc)
+            return []
 
     async def preview(
         self,
@@ -71,7 +94,8 @@ class TripService:
         #
         # The owner may arrive as an argument or ambiently; the AI tool path has no
         # argument to pass, which is what ``owner_context`` is for.
-        registry = self.provider_registry.for_owner(resolve_owner(owner_id))
+        resolved = resolve_owner(owner_id)
+        registry = self.provider_registry.for_owner(resolved)
         return await build_preview(
             profile,
             registry,
@@ -80,6 +104,7 @@ class TripService:
             # The policy lives here so every plan is judged by the same rule rather than
             # by whatever a provider stamped on its own data.
             self.freshness,
+            ingestions=self._ingestions(resolved),
         )
 
     async def create(

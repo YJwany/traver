@@ -270,6 +270,59 @@ def test_an_operator_can_override_a_horizon():
     assert policy.max_age_for("restaurant") == MAX_AGE_SECONDS["restaurant"]
 
 
+def test_user_supplied_content_deliberately_has_no_horizon():
+    """A guide does not expire on a schedule the way a forecast does.
+
+    This is a decision rather than an omission, so it is pinned: an operator editing
+    :data:`MAX_AGE_SECONDS` and adding ``user_content`` would make every genuinely useful
+    old guide raise a warning, and a warning that fires on good data is how readers learn
+    to ignore warnings. What matters for supplied content is that its age is *disclosed*,
+    which the ingestion path does through ``observed_at_basis``.
+    """
+    assert "user_content" not in MAX_AGE_SECONDS
+    assert FreshnessPolicy().max_age_for("user_content") is None
+
+
+def test_an_ancient_note_is_not_flagged_as_stale_but_its_age_is_still_known():
+    """The two halves of the rule, in one case.
+
+    A 2019 note about a neighbourhood is not "stale" in the sense a superseded forecast
+    is, so no finding is emitted. But its age is a real fact that must travel with it,
+    and it does, through the basis on the reference.
+    """
+    now = datetime.now(timezone.utc)
+    reference = _reference(
+        basis=ObservationBasis.PROVIDER_REPORTED,
+        observed_at=now - timedelta(days=2500),
+        source="user-content:xiaohongshu",
+    )
+    service = FreshnessService()
+
+    assert service.audit([("user_content", reference)], now=now) == []
+    # The age itself is still reported, which is what the reader actually needs.
+    assert reference.data_age_seconds > 200_000_000
+    assert service.age_is_known(reference) is True
+
+
+def test_an_undated_note_is_reported_as_unknown_age_not_as_stale():
+    """Same reasoning as a silent provider: "we cannot tell" is not "this is out of date".
+
+    A paste box cannot distinguish a 2019 note from yesterday's, so the honest output is
+    that the advice's age is unknown — and a caller must be able to ask that directly
+    rather than infer it from a missing date.
+    """
+    now = datetime.now(timezone.utc)
+    reference = _reference(
+        basis=ObservationBasis.SOURCE_SILENT,
+        observed_at=now,
+        source="user-content:paste",
+    )
+    service = FreshnessService()
+
+    assert service.age_is_known(reference) is False
+    assert service.stale_facts([("user_content", reference)], now=now) == []
+
+
 def test_every_finding_carries_both_times_and_a_readable_reason():
     """The user-facing requirement: say when it was fetched *and* how old it is.
 
