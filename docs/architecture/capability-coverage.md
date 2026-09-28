@@ -27,8 +27,9 @@ async def search_room_offers(self, hotel_ids, profile) -> ProviderResult:
 更糟的是，这条缺陷被一个断言钉住了：
 
 ```python
-assert payload["uncovered_capabilities"] == [], \
+assert payload["uncovered_capabilities"] == [], (
     "the default deployment should leave no capability uncovered"
+)
 ```
 
 测试在保护 bug。它通过，只是因为那个永远返回空的桩被算作了覆盖。

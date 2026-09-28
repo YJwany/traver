@@ -14,7 +14,7 @@ import asyncio
 import os
 from datetime import date
 
-from travel_api.domain.models import Pace, TravelMode, TripProfile
+from travel_api.domain.models import Pace, TripProfile
 from travel_api.providers.free import build_free_providers
 
 
@@ -53,7 +53,9 @@ async def main() -> None:
             continue
         result = await routing.calculate_routes(profile, points)
         print(f"\n=== {label} — {len(points)} points, {len(result.data)} legs ===")
-        print(f"{'mode':7} {'distance':>9} {'duration':>9} {'km/h':>6}  {'is_estimate':>11}  source")
+        print(
+            f"{'mode':7} {'distance':>9} {'duration':>9} {'km/h':>6}  {'is_estimate':>11}  source"
+        )
         for leg in result.data[:8]:
             speed = leg.distance_meters / 1000 / (leg.duration_minutes / 60)
             ctx = leg.source_reference.request_context
@@ -62,9 +64,7 @@ async def main() -> None:
                 f"{speed:>6.1f}  {str(leg.is_estimate):>11}  {ctx['duration_source']}"
             )
         measured = sum(
-            1
-            for leg in result.data
-            if leg.source_reference.request_context["duration_is_measured"]
+            1 for leg in result.data if leg.source_reference.request_context["duration_is_measured"]
         )
         print(f"measured durations: {measured}/{len(result.data)}")
 

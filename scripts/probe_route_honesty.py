@@ -1,4 +1,4 @@
-﻿"""Does the provider actually behave the way its declarations claim?
+"""Does the provider actually behave the way its declarations claim?
 
 This is the check the original capacity bug lacked. The claim/behaviour gap is where the
 false coverage lived: Overpass *declared* nothing and *returned* nothing, and the matrix
@@ -19,7 +19,6 @@ from datetime import date
 from uuid import uuid4
 
 import httpx
-
 from travel_api.domain.models import (
     Pace,
     RoutePoint,
@@ -36,7 +35,11 @@ from travel_api.providers.free.osrm import (
 )
 
 #: A real walk-versus-drive pair, as the live servers report it.
-FOOT_MATRIX = {"code": "Ok", "distances": [[0, 8386], [8420, 0]], "durations": [[0, 6708], [6740, 0]]}
+FOOT_MATRIX = {
+    "code": "Ok",
+    "distances": [[0, 8386], [8420, 0]],
+    "durations": [[0, 6708], [6740, 0]],
+}
 CAR_MATRIX = {"code": "Ok", "distances": [[0, 9479], [9490, 0]], "durations": [[0, 706], [710, 0]]}
 
 
@@ -122,4 +125,3 @@ async def probe() -> None:
 
 if __name__ == "__main__":
     asyncio.run(probe())
-
