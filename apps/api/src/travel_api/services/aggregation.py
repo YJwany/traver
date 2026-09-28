@@ -238,8 +238,24 @@ _TRAVEL_MODE_REMEDIES: dict[str, str] = {
 }
 
 
+#: What would actually close the gap, per mode, when a source that *can* serve the mode
+#: returned nothing. A different question from :data:`_TRAVEL_MODE_REMEDIES`, which is
+#: about a mode no configured source can serve at all: sending someone to configure a
+#: credential they already configured is worse than saying nothing, because they will do it
+#: and the plan will still be estimated.
+_TRAVEL_MODE_FAILURE_REMEDIES: dict[str, str] = {
+    TravelMode.WALK.value: "这通常是网络或限流问题，稍后重新规划即可",
+    TravelMode.DRIVE.value: "这通常是网络或限流问题，稍后重新规划即可",
+    TravelMode.TAXI.value: "这通常是网络或限流问题，稍后重新规划即可",
+    TravelMode.TRANSIT.value: (
+        "高德已配置但没有返回可用结果，按上面的错误码检查 Key 的权限与配额"
+        "（免费配额按日与按量计算，用尽后需等到次日或付费）"
+    ),
+}
+
+
 def _disclose_unserved_travel_mode(
-    itinerary: Itinerary, profile: TripProfile, routes: list
+    itinerary: Itinerary, profile: TripProfile, routes: list, route_results=()
 ) -> None:
     """Say when the mode the traveller asked for is not what the plan was built on.
 
@@ -256,6 +272,20 @@ def _disclose_unserved_travel_mode(
     per-mode because a wrong remedy is worse than none — it sends someone to configure a
     credential that would not have helped.
 
+    **No routes is not one fact.** There are two ways to arrive here with an explicit mode
+    and an empty ``routes`` list, and they call for opposite advice:
+
+    * no configured source serves the mode — the original case, advice is "supply a 高德
+      key";
+    * a source *is* configured and capable but every request failed or was unparseable —
+      advice is "your key is wrong / out of quota / the network is down".
+
+    Reporting the second as the first told the user to supply the key they had just
+    supplied, and it stayed hidden because AMap's routing caught its own errors and returned
+    an empty list with ``status="success"``: from outside, a broken key and a source that
+    declines the mode were byte-identical. The provider now records what it caught, so the
+    two are distinguishable here.
+
     Only fires for an *explicit* request. A pace-derived mode is the planner's own default,
     not something that went unserved, and the generic estimate disclosure already covers
     it; warning there would put a caveat on the default zero-configuration plan, which is
@@ -268,6 +298,25 @@ def _disclose_unserved_travel_mode(
 
     mode = resolve_travel_mode(profile)
     label = TRAVEL_MODE_LABELS.get(mode.value, mode.value)
+
+    # A configured source that tried and failed is a different situation from a mode nothing
+    # can serve, and it is the one where the user's own action caused the state.
+    failures: list[tuple[str, str]] = [
+        (result.provider, error)
+        for result in route_results
+        for error in (getattr(result, "errors", None) or [])
+    ]
+    if failures:
+        names = "、".join(dict.fromkeys(name for name, _ in failures))
+        cause = failures[0][1]
+        advice = _TRAVEL_MODE_FAILURE_REMEDIES.get(mode.value, "请检查该来源的配置与配额")
+        itinerary.conflicts.append(
+            f"你要求按「{label}」规划，已经配置的来源（{names}）这次没有返回可用结果"
+            f"（{cause}），因此本行程的路程时间是按距离估算的，不是实测结果。"
+            f"{advice}；修好之后重新规划，这些时间会变成实测值。"
+        )
+        return
+
     remedy = _TRAVEL_MODE_REMEDIES.get(mode.value, "接入一个支持该方式的来源")
     itinerary.conflicts.append(
         f"你要求按「{label}」规划，但没有可用的数据源能算这种路线，"
@@ -464,7 +513,7 @@ async def build_preview(
         restaurants,
         routes,
     )
-    _disclose_unserved_travel_mode(itinerary, profile, routes)
+    _disclose_unserved_travel_mode(itinerary, profile, routes, route_results)
     weather = next(iter(_collect(weather_results, WeatherForecast)), None)
     holidays = next(iter(_collect(holiday_results, HolidayCalendar)), None)
     await reporter.finish_step()

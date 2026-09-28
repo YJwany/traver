@@ -138,6 +138,23 @@ def _format_location(point: RoutePoint) -> str:
     return f"{point.longitude:.6f},{point.latitude:.6f}"
 
 
+def _unique(messages: list[str], *, limit: int = 3) -> list[str]:
+    """Distinct messages, in first-seen order, capped.
+
+    A matrix sweep makes one request per destination and a transit plan one per pair, so a
+    single bad key produces the *same* message many times. Repeating it adds nothing to a
+    diagnosis and would make the itinerary note unreadable, but the count still matters, so
+    the caller keeps ``last_attempts`` alongside this.
+    """
+    seen: list[str] = []
+    for message in messages:
+        if message not in seen:
+            seen.append(message)
+        if len(seen) == limit:
+            break
+    return seen
+
+
 class AmapRoutingProvider:
     """Serves ``calculate_routes`` from AMap, including 公交/地铁."""
 
@@ -165,12 +182,27 @@ class AmapRoutingProvider:
         #: Which mode the last run actually routed, for the audit trail.
         self.last_mode: TravelMode | None = None
         self.last_cities: tuple[str, str] | None = None
+        #: Per-request failures that were caught rather than raised, and how many requests
+        #: were attempted. Each helper catches ``AmapError`` so that one failed sweep does
+        #: not discard the legs already gathered — but catching without recording made a
+        #: total failure look exactly like a source that had nothing to say. Every request
+        #: failing with ``INVALID_USER_KEY`` produced ``status="success"``, no errors and no
+        #: legs, which downstream is indistinguishable from "no source can route this mode":
+        #: the itinerary then told the user to supply the 高德 key they had just supplied.
+        #: Recorded per call so the aggregation layer can tell the two apart.
+        self.last_attempts = 0
+        self.last_failures: list[str] = []
 
     # -- capability --------------------------------------------------------
 
     async def calculate_routes(
         self, profile: TripProfile, points: list[RoutePoint]
     ) -> ProviderResult:
+        # Reset before the sweep so the failure record describes this call and not a
+        # previous one; a stale error would blame the wrong request.
+        self.last_attempts = 0
+        self.last_failures = []
+
         if len(points) < 2:
             return ProviderResult(provider=self.name, data=[])
 
@@ -195,10 +227,16 @@ class AmapRoutingProvider:
             legs = await self._pair_legs(selected, mode, reference, profile)
 
         self.last_mode = mode
+        # Partial success is degraded, not success. Some legs back plus some requests
+        # rejected is a different state from a clean sweep, and the caller needs to know
+        # which it got: only the first means "this source is working".
+        failures = _unique(self.last_failures)
         return ProviderResult(
             provider=self.name,
+            status="degraded" if failures else "success",
             data=legs,
             source_references=[reference] if legs else [],
+            errors=failures,
         )
 
     # -- the N-call full matrix (driving / walking) ------------------------
@@ -233,13 +271,16 @@ class AmapRoutingProvider:
                 "type": str(distance_type),
             }
             async with semaphore:
+                self.last_attempts += 1
                 try:
                     payload = await self.client.get("/v3/distance", params=params)
                 except AmapError as exc:
                     # One failed sweep must not discard the legs already gathered:
                     # a partial real matrix still beats falling back to estimates
-                    # for everything.
+                    # for everything. It must still be *reported*, or a total failure
+                    # is indistinguishable from a mode this source declines.
                     logger.warning("AMap distance sweep failed: %s", exc)
+                    self.last_failures.append(str(exc))
                     return
 
             gathered = self._parse_distance_results(payload, origins, destination, mode, reference)
@@ -318,12 +359,14 @@ class AmapRoutingProvider:
                 "show_fields": "cost",
             }
             async with semaphore:
+                self.last_attempts += 1
                 try:
                     payload = await self.client.get(
                         "/v5/direction/transit/integrated", params=params
                     )
                 except AmapError as exc:
                     logger.warning("AMap transit leg failed: %s", exc)
+                    self.last_failures.append(str(exc))
                     return
             leg = self._parse_transit(payload, origin, destination, reference)
             if leg is not None:
@@ -448,6 +491,7 @@ class AmapRoutingProvider:
 
         async def one_pair(origin: RoutePoint, destination: RoutePoint) -> RouteLeg | None:
             async with semaphore:
+                self.last_attempts += 1
                 try:
                     payload = await self.client.get(
                         path,
@@ -458,6 +502,7 @@ class AmapRoutingProvider:
                     )
                 except AmapError as exc:
                     logger.warning("AMap %s leg failed: %s", mode.value, exc)
+                    self.last_failures.append(str(exc))
                     return None
             return self._parse_direction(payload, origin, destination, mode, reference)
 

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import pytest
 from travel_api.providers.amap.client import (
+    AMAP_KEY_INFOCODES,
+    AMAP_QUOTA_INFOCODES,
     AMAP_STATUS_OK,
     AmapClient,
     AmapError,
@@ -86,13 +88,49 @@ def test_an_invalid_key_is_reported_as_a_key_problem():
         )
 
 
+def test_the_two_failure_classes_never_overlap():
+    """One infocode, one meaning — not "whichever set the code checks first".
+
+    ``10003`` (访问已超出日访问量) and ``10004`` (单位时间内访问过于频繁) used to be members of
+    *both* sets. ``require_success`` consults the key set first, so the two failures a real
+    user is most likely to hit — the daily limit and rate limiting — were raised as
+    :class:`AmapKeyError`. Callers treat that as an unusable credential: ``main.py`` drops
+    the provider for the request, and places/weather re-raise it, so a user who had simply
+    used up their free quota was told their key was bad.
+
+    Ordering cannot fix that, because either answer is defensible from the code alone. The
+    overlap has to be impossible instead, which is what this asserts. ``AmapQuotaError``'s
+    own docstring states the purpose: "so the UI does not tell someone to check a key that
+    is perfectly fine".
+    """
+    assert AMAP_KEY_INFOCODES & AMAP_QUOTA_INFOCODES == set(), (
+        "an infocode cannot mean both 'your key is bad' and 'you have used it too much'"
+    )
+
+
 def test_exceeding_the_daily_quota_is_not_reported_as_a_bad_key():
     """Different remedy: the key is fine and telling the user to re-enter it wastes
-    their time and hides the real cause."""
-    with pytest.raises(AmapQuotaError):
-        require_success(
-            {"status": "0", "infocode": "10044", "info": "DAILY_QUERY_OVER_LIMIT"}, operation="x"
-        )
+    their time and hides the real cause.
+
+    Parametrised over *every* quota code rather than one. The original version used
+    ``10044`` alone — the single quota code that happened never to be in the key set as
+    well — so it certified the distinction while the two most common codes were
+    misclassified.
+    """
+    for infocode in sorted(AMAP_QUOTA_INFOCODES):
+        with pytest.raises(AmapQuotaError):
+            require_success(
+                {"status": "0", "infocode": infocode, "info": "OVER_LIMIT"}, operation="x"
+            )
+
+
+def test_every_key_code_still_reads_as_a_key_problem():
+    """The other direction, so the fix above cannot be "put everything in quota"."""
+    for infocode in sorted(AMAP_KEY_INFOCODES):
+        with pytest.raises(AmapKeyError):
+            require_success(
+                {"status": "0", "infocode": infocode, "info": "KEY_PROBLEM"}, operation="x"
+            )
 
 
 def test_an_unknown_failure_is_still_permanent():

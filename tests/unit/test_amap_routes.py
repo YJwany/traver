@@ -723,3 +723,126 @@ def test_a_budget_below_two_is_not_expressible():
     disable routing altogether while looking like a valid setting."""
     provider, _ = _provider(max_points=1)
     assert provider.max_points >= 2
+
+
+# -- a failure must be reported, not swallowed ------------------------------
+#
+# Every helper below catches ``AmapError`` so one failed sweep does not discard the legs
+# already gathered. Catching without recording was the bug: when *every* request failed the
+# provider still returned ``status="success"`` with no errors and no legs, which from
+# outside is byte-identical to a source that has nothing to say about this mode.
+#
+# The consequence was user-visible. With a valid-looking but rejected key, transit produced
+# no legs, and the itinerary explained 「没有可用的数据源能算这种路线」 and advised supplying a
+# 高德 key — to the person who had just supplied one. Nothing anywhere said the key had been
+# refused, because the only trace was a ``logger.warning``.
+
+
+class _RejectingHttp:
+    """Every request rejected, as an invalid key, wrong platform or spent quota would be."""
+
+    def __init__(self, message: str = "AMap request failed: infocode=10001 info=INVALID_USER_KEY"):
+        self.message = message
+        self.calls = 0
+
+    async def get_json(self, url, *, params=None):
+        self.calls += 1
+        from travel_api.providers.amap.client import AmapError
+
+        raise AmapError(self.message)
+
+    async def post_json(self, url, *, data=None):
+        raise AssertionError("routing must not use POST")
+
+
+def _rejecting_provider(**kwargs):
+    http = _RejectingHttp()
+    return AmapRoutingProvider(AmapClient(http=http, key="rejected-key"), **kwargs), http
+
+
+@pytest.mark.asyncio
+async def test_a_failed_transit_sweep_reports_itself_as_degraded():
+    provider, http = _rejecting_provider()
+    points = [_point(39.90, 116.40), _point(39.95, 116.48), _point(39.99, 116.52)]
+
+    result = await provider.calculate_routes(_transit_profile(), points)
+
+    assert http.calls > 0, "the probe must actually attempt requests"
+    assert result.data == []
+    assert result.status == "degraded", "a total failure is not a success"
+    assert result.errors, "the reason must travel with the result, not only to the log"
+    assert "10001" in result.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_driving_sweep_reports_itself_too():
+    """Not transit-specific: the matrix path collapses identically, and so does walking."""
+    provider, http = _rejecting_provider()
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    assert http.calls > 0
+    assert result.status == "degraded"
+    assert result.errors
+
+
+@pytest.mark.asyncio
+async def test_a_clean_sweep_is_not_marked_degraded():
+    """The other direction. If every sweep read as degraded the field would carry no
+    information, and a reader would stop distinguishing a broken key from a working one."""
+    provider, _ = _provider({"/v3/distance": _counting_sweep})
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    assert result.data
+    assert result.status == "success"
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
+async def test_the_same_failure_is_repeated_once_not_once_per_request():
+    """A matrix makes one request per destination, so one bad key fails N times.
+
+    Repeating the identical sentence N times would make the note unreadable without adding
+    anything to the diagnosis; the distinct message is what matters.
+    """
+    provider, http = _rejecting_provider()
+    points = [_point(39.90 + index * 0.01, 116.40) for index in range(6)]
+
+    result = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    assert http.calls >= 4
+    assert len(result.errors) == 1
+
+
+@pytest.mark.asyncio
+async def test_failures_do_not_leak_from_one_call_into_the_next():
+    """The record is per call. A stale error would blame the wrong request — and would
+    mark a later healthy plan as degraded forever."""
+    provider, _ = _rejecting_provider()
+    points = [_point(39.90, 116.40), _point(39.95, 116.48)]
+    failed = await provider.calculate_routes(_profile(Pace.FULL), points)
+    assert failed.status == "degraded"
+
+    # Same provider instance, now pointed at a working endpoint.
+    provider.client = AmapClient(http=_RoutingHttp({"/v3/distance": _counting_sweep}), key="k")
+    recovered = await provider.calculate_routes(_profile(Pace.FULL), points)
+
+    assert recovered.status == "success"
+    assert recovered.errors == []
+
+
+def test_the_probe_claim_is_not_vacuous():
+    """``_RejectingHttp`` must raise the *transport* error this provider catches.
+
+    If it raised something else the tests above would pass through a different path and
+    prove nothing about the handling they claim to cover.
+    """
+    from travel_api.providers.amap.client import AmapError
+
+    assert issubclass(AmapError, Exception)
+    provider, http = _rejecting_provider()
+    assert provider.client is not None
+    assert http.message

@@ -249,6 +249,10 @@
 
 设计细节见 [`docs/architecture/amap-contract.md`](architecture/amap-contract.md)。要点：
 
+- **两个只在「有 Key 的用户」身上才出现的缺陷**（无 Key 时高德根本不构建，所以两者都不会显形，也都没有任何测试能碰到）：
+  1. **配额被当成钥匙错误**：`10003`/`10004` 同时属于「钥匙问题」和「配额问题」两个集合，而分类函数先查前者——于是「今日访问量已超」被抛成 `AmapKeyError`，`main.py` 把这个异常当作**凭据不可用而丢弃整个 Provider**，用户被告知去改一个完全正常的 Key。修法是让两个集合**互斥**（顺序无法修复重叠，两边都说得通），并加断言交集为空的测试。原来的配额测试只用了 `10044`——唯一一个恰好不重叠的配额码——所以它「验证」了这层区分而两个最常用的码一直是错的
+  2. **路线失败被吞掉**：三条路径都 catch `AmapError` 以免一次失败丢掉已得路段，但只 catch 不记录，于是全部请求失败时仍返回 `status="success"`、`errors=[]`、`data=[]`——**与「这个来源不支持该方式」在外部完全一样**。后果是行程对刚填好 Key 的人说「没有可用的数据源……请接入高德 Key」。现记录 `last_attempts`/`last_failures`，有失败即 `degraded` 并带 `errors`，聚合层据此把「没有来源」与「来源已配置但失败」分成两种措辞与两种建议
+  3. 这类缺陷的共同点：**Provider 自己把失败处理掉了，所以外部看到的是成功**。已加 `scripts/probe_amap_failure_visibility.py`（用总是失败的传输层复现，无需真实 Key）
 - 清单里写着「公交/地铁是 OSRM 完全没有的能力，这是接入它的主要理由」，挂了很久，而**它做不到**：
   选路只有一个入口 `mode_for_pace(pace)`，而 `Pace` 只有 relaxed/balanced/full 三个成员，
   所以它永远返回不了 `TravelMode.TRANSIT`；`_transit_legs` 只能由那一个 `if mode is TRANSIT`

@@ -60,10 +60,23 @@ AMAP_STATUS_OK = "1"
 #: infocodes that mean "your key is the problem" rather than "your request is".
 #: Distinguished because the remedy differs and only one is actionable by the user:
 #: a bad key is fixed in the settings page, a bad parameter is a bug here.
-#:   10001 key 不正确或过期 · 10002 没有权限使用相应的服务 · 10003 访问过于频繁
-#:   10004 单位时间访问过于频繁(日) · 10044 账号维度日调用量超限
-#:   10019/10020/10021 配额相关
-AMAP_KEY_INFOCODES = frozenset({"10001", "10002", "10003", "10004", "10005", "10009", "10012"})
+#:   10001 key 不正确或过期 · 10002 没有权限使用相应的服务
+#:   10005 IP 白名单出错 · 10009 请求 key 与绑定平台不符 · 10012 权限不足
+AMAP_KEY_INFOCODES = frozenset({"10001", "10002", "10005", "10009", "10012"})
+
+#: infocodes that mean "your key is fine, you have used it too much".
+#:   10003 访问已超出日访问量 · 10004 单位时间内访问过于频繁
+#:   10019/10020/10021 配额相关 · 10044 账号维度日调用量超限
+#:
+#: These two sets must stay **disjoint**, and that is not a style preference.
+#: ``require_success`` used to test the key set first while ``10003`` and ``10004`` were
+#: members of both, so the two most likely failures for a real user — the daily limit and
+#: rate limiting — raised :class:`AmapKeyError`. Callers treat that as an unusable
+#: credential and either drop the provider for the whole request or tell the user to check a
+#: key that is perfectly valid, which is precisely what :class:`AmapQuotaError` exists to
+#: prevent. Whichever set is consulted first would have won, so the fix is to make the
+#: question have one answer rather than to reorder the checks;
+#: ``tests/unit/test_amap_client.py`` asserts the intersection is empty.
 AMAP_QUOTA_INFOCODES = frozenset({"10003", "10004", "10019", "10020", "10021", "10044"})
 
 #: Parameters whose values must never appear in a log line or an exception.

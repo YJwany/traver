@@ -40,9 +40,9 @@ def _profile(*, pace: Pace = Pace.BALANCED, travel_mode: TravelMode | None = Non
     )
 
 
-def _disclose(profile: TripProfile, routes: list):
+def _disclose(profile: TripProfile, routes: list, route_results=()):
     itinerary = Itinerary(days=[], conflicts=[])
-    _disclose_unserved_travel_mode(itinerary, profile, routes)
+    _disclose_unserved_travel_mode(itinerary, profile, routes, route_results)
     return itinerary.conflicts
 
 
@@ -164,3 +164,120 @@ def test_a_plan_with_no_travel_at_all_is_still_told_its_mode_was_unserved():
     """
     conflicts = _disclose(_profile(travel_mode=TravelMode.TRANSIT), routes=[])
     assert conflicts, "an unserved request must be disclosed even with no legs at all"
+
+
+# -- "no source can do this" vs "the source is configured and failing" ------
+#
+# Empty `routes` with an explicit mode has two causes and they need opposite advice. The
+# original wording asserted the first unconditionally — 「没有可用的数据源能算这种路线」 — and
+# then recommended supplying a 高德 key. For a user whose key was configured but rejected
+# (invalid, wrong platform, daily quota spent), that is false and the advice is one they had
+# already followed. The state was invisible because the provider swallowed its own errors
+# and reported success, so the plan looked exactly like a zero-configuration one.
+
+
+class _Result:
+    """Stands in for a ProviderResult: only the two fields the disclosure reads."""
+
+    def __init__(self, provider: str, errors: list[str] | None = None) -> None:
+        self.provider = provider
+        self.errors = errors or []
+
+
+def test_a_configured_source_that_failed_is_not_reported_as_a_missing_source():
+    conflicts = _disclose(
+        _profile(travel_mode=TravelMode.TRANSIT),
+        routes=[],
+        route_results=[_Result("amap", ["AMap transit/integrated failed: infocode=10001"])],
+    )
+
+    assert len(conflicts) == 1
+    note = conflicts[0]
+    # It must not claim no source exists — one did, and it answered.
+    assert "没有可用的数据源" not in note
+    assert "已经配置" in note
+    # The provider is named, so the reader knows which key to look at.
+    assert "amap" in note
+    # And the reason AMap gave travels with it, rather than staying in the server log.
+    assert "10001" in note
+
+
+def test_a_configured_source_that_failed_is_not_told_to_add_a_key():
+    """The specific harm: the remedy pointed at a credential already supplied."""
+    note = _disclose(
+        _profile(travel_mode=TravelMode.TRANSIT),
+        routes=[],
+        route_results=[_Result("amap", ["infocode=10003 访问已超出日访问量"])],
+    )[0]
+
+    assert "接入高德" not in note
+    # Instead it points at the things that can actually be wrong with a key that exists.
+    assert "配额" in note or "Key" in note
+
+
+def test_a_healthy_source_that_declines_the_mode_still_gets_the_missing_source_note():
+    """The other direction, and the zero-configuration case: nothing failed, nothing was
+    returned, and the correct advice is still 'supply a 高德 key'."""
+    conflicts = _disclose(
+        _profile(travel_mode=TravelMode.TRANSIT),
+        routes=[],
+        route_results=[_Result("osrm", [])],
+    )
+
+    assert len(conflicts) == 1
+    assert "没有可用的数据源" in conflicts[0]
+    assert "高德" in conflicts[0]
+
+
+def test_a_quota_failure_names_the_quota_rather_than_the_key():
+    """A spent free quota is the likeliest failure for a personal 高德 account, and the
+    remedy is to wait or pay — not to re-enter a key that is fine."""
+    note = _disclose(
+        _profile(travel_mode=TravelMode.TRANSIT),
+        routes=[],
+        route_results=[_Result("amap", ["infocode=10004 单位时间内访问过于频繁"])],
+    )[0]
+
+    assert "配额" in note
+
+
+def test_walking_that_failed_is_not_sent_to_configure_a_credential():
+    """Walking and driving are served by the free tier, so a failure there is a transient
+    fault. Sending that user to the settings page would waste their time."""
+    note = _disclose(
+        _profile(travel_mode=TravelMode.WALK),
+        routes=[],
+        route_results=[_Result("osrm", ["OSRM returned code 'NoRoute'"])],
+    )[0]
+
+    assert "已经配置" in note
+    assert "网络" in note or "限流" in note or "重试" in note
+
+
+def test_several_failing_providers_are_all_named_once():
+    """Two sources failing is one finding; naming the first and hiding the second would
+    make the reader fix half the problem."""
+    note = _disclose(
+        _profile(travel_mode=TravelMode.WALK),
+        routes=[],
+        route_results=[
+            _Result("osrm", ["one"]),
+            _Result("amap", ["two"]),
+            _Result("osrm", ["three"]),
+        ],
+    )[0]
+
+    assert "osrm" in note
+    assert "amap" in note
+    assert note.count("osrm") == 1
+
+
+def test_a_failure_does_not_suppress_the_disclosure_when_routes_exist():
+    """A partial sweep that produced some legs is reported through the legs themselves;
+    the itinerary already says how many are estimates."""
+    conflicts = _disclose(
+        _profile(travel_mode=TravelMode.TRANSIT),
+        routes=[object()],
+        route_results=[_Result("amap", ["one failed sweep"])],
+    )
+    assert conflicts == []
