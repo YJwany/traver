@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from travel_api.api.dependencies import get_principal, require_read, require_write
 from travel_api.domain.ingestion import IngestionRequest
@@ -35,6 +35,7 @@ from travel_api.services.credentials import (
     VaultLockedError,
     configured_credentials,
 )
+from travel_api.services.export import content_disposition, to_ics, to_markdown
 from travel_api.services.planning_jobs import job_as_dict
 from travel_api.services.trip_service import (
     ConcurrentTripUpdateError,
@@ -742,6 +743,64 @@ async def get_changes(
     except TripNotFoundError as exc:
         raise HTTPException(status_code=404, detail="trip not found") from exc
     return [item.model_dump(mode="json") for item in trip.change_history]
+
+
+def _export_response(trip: Trip, body: str, *, media_type: str, extension: str) -> Response:
+    """Serve an export as a download, named after the trip rather than the id.
+
+    A file called ``<uuid>.ics`` is unopenable six months later; one named for the destination
+    and dates is the whole point of exporting. The naming rules, and the non-ASCII header
+    problem that broke this the first time, live in ``services/export.content_disposition``.
+    """
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": content_disposition(trip, extension=extension),
+            # The document is a snapshot of a moment, so it must not be cached as if it were
+            # the live plan. Re-exporting is cheap; serving a stale file is the kind of
+            # freshness failure this whole area exists to prevent.
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/trips/{trip_id}/export.md", dependencies=[Depends(require_read)])
+async def export_trip_markdown(
+    trip_id: UUID,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> Response:
+    """The full record: itinerary, limits, budget and every source with both of its times."""
+    try:
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+    except TripNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="trip not found") from exc
+    return _export_response(
+        trip,
+        to_markdown(trip),
+        media_type="text/markdown; charset=utf-8",
+        extension="md",
+    )
+
+
+@router.get("/trips/{trip_id}/export.ics", dependencies=[Depends(require_read)])
+async def export_trip_calendar(
+    trip_id: UUID,
+    request: Request,
+    principal: Principal = Depends(get_principal),
+) -> Response:
+    """The plan as a calendar, for the one artifact that ends up on a phone."""
+    try:
+        trip = trip_service(request).get(trip_id, owner_id=_resolved_owner(request, principal))
+    except TripNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="trip not found") from exc
+    return _export_response(
+        trip,
+        to_ics(trip),
+        media_type="text/calendar; charset=utf-8",
+        extension="ics",
+    )
 
 
 # -- user-supplied content -------------------------------------------------

@@ -34,6 +34,18 @@ class Pace(StrEnum):
     FULL = "full"
 
 
+#: Chinese wording for each pace. The web client has had its own copy since the form was
+#: built; the server needs one too as soon as it writes prose of its own (an exported
+#: document), because "节奏：balanced" is not a sentence. ``tests/unit/test_web_api_contract.py``
+#: compares the two tables, since nothing else can see both languages at once — the same
+#: guard that caught the form offering a pace the API rejects.
+PACE_LABELS: dict[str, str] = {
+    Pace.RELAXED.value: "轻松节奏",
+    Pace.BALANCED.value: "适中节奏",
+    Pace.FULL.value: "紧凑节奏",
+}
+
+
 class TravelMode(StrEnum):
     WALK = "walk"
     TRANSIT = "transit"
@@ -80,6 +92,19 @@ class ItineraryItemType(StrEnum):
     RESTAURANT = "restaurant"
     TRANSFER = "transfer"
     BUFFER = "buffer"
+
+
+#: Chinese wording for each item kind, so a document the server writes (an export) is readable
+#: without the application. Beside the enum for the same reason as the two tables above: a
+#: new member with no wording here is an omission you can see, and a raw ``transfer`` in a
+#: printed itinerary is not.
+ITEM_TYPE_LABELS: dict[str, str] = {
+    ItineraryItemType.HOTEL.value: "酒店",
+    ItineraryItemType.ATTRACTION.value: "景点",
+    ItineraryItemType.RESTAURANT.value: "餐饮",
+    ItineraryItemType.TRANSFER.value: "交通 / 换乘",
+    ItineraryItemType.BUFFER.value: "缓冲 / 休息",
+}
 
 
 class ObservationBasis(StrEnum):
