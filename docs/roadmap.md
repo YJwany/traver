@@ -436,6 +436,7 @@ profile——**正因为数据真的存在，这个错误特别像对的**。矩
 - **同类的占位值**：`RouteOptimizer.optimize` 的调用方在没有选中酒店时传 `(0.0, 0.0)`（几内亚湾），仅因三行之外的 `hotel_id is not None` 守卫才无害——一个看起来真实的值靠着别处的判断才安全。现传 `None`，并加测试钉住「有坐标无 id 时不得据此推算」与「`None` 与占位值行为必须一致」
 - **同一模块里的第三个写死假设**：`itinerary_fit` 用 `hotel.location.city == profile.destination` 判断「酒店在不在行程城市」。旅行者输入 `丽江`，Nominatim 报 `丽江市`，而高德用旅行者原文查询并原样回传——于是相等比较对免费源每家酒店都答「不是」、对高德每家都答「是」，**配不配 Key 会换掉排序**（同一家酒店 0.2 或 0.9）。区的比较同理：Overpass 用 OSM `suburb`（西湖街道），高德用 `businessarea`（西湖）。现由 `same_place_name()` 做三值比较（缺名字返回 `None` 而非「是另一个地方」），五个自治区用写死的五条表而非猜中文语法的正则。**变异教训**：给区比较加的折叠逻辑最初被「改回相等比较」的变异完全绕过，因为原有测试两侧用的是同一个拼法——比较两套词汇表，就必须在两套词汇表之间测
 - **`ScoreBreakdown` 与加权和是两份手写列表**，这就是 `itinerary_fit` 会「被从和里删掉、模型却仍要求它」的原因（好一点是 `KeyError`，坏一点是一份声称用了某维度的分数）。现 breakdown 由 `ScoreBreakdown(**measured)` 构造，并有一条测试**从 breakdown 反算分数**要求与存储值一致
+- **同一个「伪造观测时间」的错误在 Overpass 上又出现一次**：`_osm_base_timestamp` 在没有 `osm3s.timestamp_osm_base` 时回退到 `datetime.now()`，引用却无条件写成 `PROVIDER_REPORTED`——一条没有时间戳的响应会声称「数据是几秒前的，且是 OSM 说的」，于是 `age_is_about_the_data` 为真、freshness 审计永远不报 `age_unknown`。现按 `amap/weather.py` 已有的正确形态处理：回退时 basis 改 `SOURCE_SILENT` 并记录 `osm_base_missing`。**它之所以活下来，是因为原有的测试只走了「有时间戳」这条路径，且从未断言过 basis**——两条新测试补上了这两件事
 - **数值解析修正**：`_parse_decimal()` 会跳过前导符号，`-1` 被解析为 `1`（畸形星级变合法、负数金额变正数价格），末尾的 `amount >= 0` 因此是死代码；现已保留符号并拒绝负值
 
 随 Phase 4C 又发现并修掉三处：

@@ -16,6 +16,7 @@ from travel_api.domain.models import (
     Attraction,
     DataDomain,
     Hotel,
+    ObservationBasis,
     Pace,
     Restaurant,
     RoutePoint,
@@ -177,7 +178,7 @@ NOMINATIM_PAYLOAD = [
 ]
 
 
-def _handler(*, overpass_fail_first_mirror: bool = False):
+def _handler(*, overpass_fail_first_mirror: bool = False, overpass_omit_osm_base: bool = False):
     def handler(request: httpx.Request) -> httpx.Response:
         host = request.url.host
         path = request.url.path
@@ -188,6 +189,11 @@ def _handler(*, overpass_fail_first_mirror: bool = False):
         if host == "overpass-api.de" and overpass_fail_first_mirror:
             return httpx.Response(504, text="server is probably too busy")
         if "overpass" in host or host == "maps.mail.ru":
+            if overpass_omit_osm_base:
+                # An Overpass response with no `osm3s.timestamp_osm_base`. Real responses
+                # normally carry it, which is exactly why the fallback path went unnoticed.
+                payload = {key: value for key, value in OVERPASS_PAYLOAD.items() if key != "osm3s"}
+                return httpx.Response(200, json=payload)
             return httpx.Response(200, json=OVERPASS_PAYLOAD)
         if host == "api.open-meteo.com":
             return httpx.Response(200, json=FORECAST_PAYLOAD)
@@ -219,6 +225,7 @@ FOSSGIS_OSRM = "https://routing.openstreetmap.de"
 def build_stack(
     *,
     overpass_fail_first_mirror: bool = False,
+    overpass_omit_osm_base: bool = False,
     routing_base_url: str = FOSSGIS_OSRM,
     **provider_kwargs,
 ):
@@ -226,7 +233,10 @@ def build_stack(
         user_agent="TraverTest/1.0",
         **NO_RETRY,
         transport=httpx.MockTransport(
-            _handler(overpass_fail_first_mirror=overpass_fail_first_mirror)
+            _handler(
+                overpass_fail_first_mirror=overpass_fail_first_mirror,
+                overpass_omit_osm_base=overpass_omit_osm_base,
+            )
         ),
     )
     geo = GeoResolver(http)
@@ -759,6 +769,74 @@ async def test_overpass_uses_osm_snapshot_time_as_observation_time():
     assert reference.observed_at.isoformat().startswith("2026-09-27T16:13:33")
     assert reference.domain is DataDomain.GEO_FACT
     assert reference.request_context["osm_id"] == 999001
+    # And the basis says this timestamp is OSM's, not ours. Without this assertion the test
+    # above passes even when the provider mislabels the fallback as provider-reported.
+    assert reference.observed_at_basis is ObservationBasis.PROVIDER_REPORTED
+    assert "osm_base_missing" not in reference.request_context
+    await http.aclose()
+
+
+async def test_a_silent_osm_response_is_not_reported_as_a_provider_stamped_one():
+    """The 时效性 rule applied to the one provider that had it backwards.
+
+    Overpass normally publishes ``osm3s.timestamp_osm_base``. ``_osm_base_timestamp`` used to
+    return ``datetime.now()`` when it did not, and the reference was unconditionally stamped
+    ``PROVIDER_REPORTED`` — so an undated response produced a citation asserting that the data
+    was seconds old **and that OSM had said so**.
+
+    That is a fabricated observation time on the exact field the freshness system exists to
+    protect, and it is worse than a missing one: ``age_is_about_the_data`` returns True, so the
+    datum counts as evidence of recency, and ``audit`` never reports it as age-unknown.
+
+    The correct shape already existed next door in ``amap/weather.py``: fall back to the fetch
+    time for ``observed_at``, switch the basis to ``SOURCE_SILENT``, and record the absence.
+    """
+    http, _, poi, *_ = build_stack(overpass_omit_osm_base=True)
+    hotels = (await poi.search_hotels(make_profile())).data
+    assert hotels, "the fixture must still return data, or this tests nothing"
+
+    reference = hotels[0].source_references[0]
+    assert reference.observed_at_basis is ObservationBasis.SOURCE_SILENT, (
+        "OSM published no snapshot time, so the timestamp is ours and must not be labelled "
+        "as the source's own"
+    )
+    assert reference.request_context["osm_base_missing"] is True
+
+    # The two consequences that make this matter, asserted directly rather than inferred.
+    assert reference.observed_at_basis.age_is_about_the_data is False, (
+        "a silent source must never be counted as evidence about the data's age"
+    )
+    # `observed_at` is still populated — it is the fetch time — so a reader always has a
+    # timestamp; only its *meaning* changed.
+    assert reference.observed_at is not None
+    assert abs((reference.observed_at - reference.fetched_at).total_seconds()) < 5
+    await http.aclose()
+
+
+async def test_a_silent_osm_response_is_reported_as_age_unknown_by_the_audit():
+    """The end-to-end consequence: the freshness audit must classify it as unverifiable.
+
+    This is what the mislabelling hid. With ``PROVIDER_REPORTED`` and a timestamp of *now*, the
+    audit saw a datum 0 seconds old and said nothing at all — the plan silently implied the OSM
+    data was current. With ``SOURCE_SILENT`` it is reported as ``age_unknown``, which is the
+    honest finding: we asked, and nobody told us when the data was made.
+    """
+    from travel_api.services.freshness import FreshnessService
+
+    http, _, poi, *_ = build_stack(overpass_omit_osm_base=True)
+    hotels = (await poi.search_hotels(make_profile())).data
+    references = hotels[0].source_references
+
+    findings = FreshnessService().audit([("attraction", ref) for ref in references])
+    assert findings, (
+        "an undated OSM response produced no freshness finding, so the plan implies the data "
+        "is current"
+    )
+    assert [finding["reason"] for finding in findings] == ["age_unknown"]
+    finding = findings[0]
+    assert finding["source"] == "openstreetmap"
+    # The reader is told both times, so they can see which one the basis applies to.
+    assert finding["observed_at"] and finding["fetched_at"]
     await http.aclose()
 
 

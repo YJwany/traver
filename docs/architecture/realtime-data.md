@@ -33,6 +33,14 @@
 
 还有一个更细的坑：高德的 `reporttime` 是**北京时间（UTC+8）且不带时区**。若按 UTC 解读，会把发布时间放到八小时后的未来，`data_age_seconds` 于是被夹到 0，**旧预报反而显得最新**。这是唯一会「隐藏过期」的错误方向，所以有专门的测试钉住它（`test_reporttime_is_read_as_beijing_time_not_utc`）。
 
+### 同一个错误在 Overpass 上又出现了一次（写反了）
+
+高德天气修好之后，同一个形状的缺陷留在了免费的 POI 来源里。Overpass 正常会返回 `osm3s.timestamp_osm_base`（OSM 的数据快照时间），而 `_osm_base_timestamp` 在没有这个字段时**回退到 `datetime.now()`**，引用却无条件写成 `PROVIDER_REPORTED`。于是一次没有时间戳的响应会产出一条引用，声称**这份数据是几秒前的，而且是 OSM 自己说的**。
+
+这比「缺少时间戳」更糟：`age_is_about_the_data` 因此返回 True，这份数据就成了「新鲜」的证据，`audit` 也永远不会把它报成 `age_unknown`——计划会静默地暗示 OSM 数据是最新的。正确的形态其实就在隔壁的 `amap/weather.py` 里：回退时 `observed_at` 用抓取时间，`basis` 改成 `SOURCE_SILENT`，并把缺失记进 `request_context`（`osm_base_missing`）。
+
+值得注意的是**为什么它能活下来**：`test_overpass_uses_osm_snapshot_time_as_observation_time` 只断言了 `observed_at` 是不是那个快照时间——而正常响应里确实有快照时间，所以那条路径是对的。**没有测试走过「没有时间戳」这条分支，也没有测试断言过 basis。** 现在两条都有：一条断言有快照时间时 basis 是 `PROVIDER_REPORTED`，两条覆盖缺失时 basis 是 `SOURCE_SILENT`、缺失被记录、`age_is_about_the_data` 为 False，以及 freshness 审计把它报成 `age_unknown`。
+
 ## 数据的年龄上限（`MAX_AGE_SECONDS`）
 
 TTL 与年龄上限是两个不同的问题：

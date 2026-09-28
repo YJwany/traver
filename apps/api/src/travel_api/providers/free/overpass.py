@@ -297,11 +297,11 @@ class OverpassPoiProvider:
             )
             self.last_endpoint = endpoint
 
-            observed_at = self._osm_base_timestamp(payload)
+            osm_base = self._osm_base_timestamp(payload)
             pois = self._parse_elements(payload)
             reference = self._source_reference(
                 source_id=f"overpass:{place.bbox_string}",
-                observed_at=observed_at,
+                osm_base=osm_base,
                 request_context={
                     "destination": destination,
                     "resolved_city": place.city,
@@ -319,18 +319,27 @@ class OverpassPoiProvider:
             return pois, reference
 
     @staticmethod
-    def _osm_base_timestamp(payload: dict) -> datetime:
-        """OSM publishes the data snapshot time; that is the real observation time."""
+    def _osm_base_timestamp(payload: dict) -> datetime | None:
+        """OSM's published snapshot time, or ``None`` if it did not publish one.
+
+        Returning ``None`` rather than a substituted "now" is the whole point. The caller
+        labels the reference ``PROVIDER_REPORTED`` only when this returns a real value, and
+        ``PROVIDER_REPORTED`` is what makes ``FreshnessService`` treat the age as a fact about
+        the *data*. Falling back to the current time while still claiming the source reported
+        it would produce a reference that reads as "this OSM snapshot is 0 seconds old, and OSM
+        said so" — when OSM said nothing. That is a fabricated observation time on the very
+        field the 时效性 rule exists to protect.
+        """
         raw = ((payload or {}).get("osm3s") or {}).get("timestamp_osm_base")
         if isinstance(raw, str):
             try:
                 parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=timezone.utc)
-                return parsed
             except ValueError:
-                pass
-        return datetime.now(timezone.utc)
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        return None
 
     @staticmethod
     def _parse_elements(payload: dict) -> list[_Poi]:
@@ -577,17 +586,42 @@ class OverpassPoiProvider:
         )
 
     def _source_reference(
-        self, *, source_id: str, observed_at: datetime, request_context: dict
+        self, *, source_id: str, osm_base: datetime | None, request_context: dict
     ) -> SourceReference:
+        """One reference for this POI set, with the basis the response actually supports.
+
+        Two outcomes, and they must not be merged:
+
+        * OSM published ``timestamp_osm_base`` — the age is a fact about the data, so the basis
+          is ``PROVIDER_REPORTED`` and ``observed_at`` is that instant;
+        * OSM published nothing usable — we still need an ``observed_at``, so it becomes our
+          fetch time, but the basis is ``SOURCE_SILENT`` and the absence is recorded in the
+          request context. ``SOURCE_SILENT`` is what tells every downstream reader that the
+          timestamp describes *our request*, not the data.
+
+        This mirrors ``amap/weather.py``, which handles the same fork for 高德's ``reporttime``.
+        Before this, the missing case wrote the current time and still claimed
+        ``PROVIDER_REPORTED``, so an undated OSM response produced a reference asserting that
+        the data was seconds old and that OSM had said so.
+        """
+        now = datetime.now(timezone.utc)
+        if osm_base is None:
+            context = {**request_context, "osm_base_missing": True}
+            observed_at = now
+            basis = ObservationBasis.SOURCE_SILENT
+        else:
+            context = request_context
+            observed_at = osm_base
+            basis = ObservationBasis.PROVIDER_REPORTED
         return SourceReference(
             source=self.name,
             source_type=SourceType.OPEN_DATA,
             source_id=source_id,
             observed_at=observed_at,
-            observed_at_basis=ObservationBasis.PROVIDER_REPORTED,
-            fetched_at=datetime.now(timezone.utc),
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.poi_ttl_seconds),
-            request_context=request_context,
+            observed_at_basis=basis,
+            fetched_at=now,
+            expires_at=now + timedelta(seconds=self.poi_ttl_seconds),
+            request_context=context,
             data_version="osm-live",
             confidence=0.9,
             domain=DataDomain.GEO_FACT,
