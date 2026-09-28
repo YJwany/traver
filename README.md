@@ -19,7 +19,10 @@ Phase 0-4 的可运行底座已经落地：
 - RequirementAgent、OpenAI-compatible Adapter、结构化 Tool Calling 和本地 deterministic fallback
 - Trip Conversation、AI Tool Call/Run 日志、会话上下文裁剪
 - Travel Workspace：创建旅行、旅行列表、行程、地图坐标视图、酒店/美食/景点、预算、来源、AI Chat 和修改 diff
-- 392 个离线 pytest 测试 + 8 个可选的真实网络端到端测试
+- 异步规划作业与实时进度推送（SSE），重规划走同一套
+- 导出：Markdown 完整记录（`GET /api/v1/trips/{id}/export.md`）与日历（`.../export.ics`），
+  两种都写明生成时间、逐条标注「抓取时间 / 数据自身时间」与无法判断年龄的部分
+- **792 个离线 pytest 测试 + 8 个可选的真实网络端到端测试**；前端 174 个 vitest 测试
 - PostgreSQL/PostGIS 与 API 的 Docker Compose 开发环境
 
 ## 这是一套"汇总工具"：数据源与模型都由你接入
@@ -41,6 +44,8 @@ Traver 自己**不提供数据，也不绑定任何模型**。它是一套把外
 同一次部署可以多人使用各自的模型与 Key，互不影响：数据源按属主解析，某人的 Key 只会解锁他自己的能力。
 
 威胁模型与边界写在 [docs/architecture/credentials.md](docs/architecture/credentials.md)：它防数据库泄露、防篡改、防跨租户搬移，**不防**能读取整个文件系统或能在进程内执行代码的攻击者。这些说清楚比笼统说"已加密"更有用。
+
+**先说清楚导出的东西是什么。** 一份行程可以导出成 Markdown 或日历，但导出的文件是**快照**：它的数字不会自动更新，文件里写明了生成时间，并且逐条标注每个来源的「抓取时间」（我们何时去问，永远已知）与「数据自身时间」（数据何时产生，不少来源并不提供）。时间按**目的地当地时间**写入日历，因为行程里没有记录时区——所以日历客户端会按设备时区显示它，跨时区时显示出来的时刻与当地时刻不同。这一点在文件和界面上都写着，而不是留给你自己发现。
 
 ## 数据来源：默认全部免费、无需密钥
 
