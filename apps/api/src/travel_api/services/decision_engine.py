@@ -55,6 +55,7 @@ from travel_api.domain.models import (
     TripProfile,
 )
 from travel_api.services.entity_resolution import geo_distance_meters
+from travel_api.services.normalization import same_place_name
 
 #: Beyond this distance from the plan's centre a hotel earns no transit credit. A constant
 #: rather than a tuning knob because it is a statement about walking in a city, not a
@@ -66,6 +67,12 @@ TRANSIT_RADIUS_METERS = 3000.0
 #: changed, from 成都's names to whatever district this plan actually sits in.
 SAME_DISTRICT_SCORE = 0.9
 OTHER_DISTRICT_SCORE = 0.6
+
+#: Scores for "is it in the city the trip is about". Separate names from the district pair
+#: above because they are separate judgements with separate failure modes — the city comes
+#: from the provider's own field and needs suffix folding, the district from the plan's points.
+SAME_CITY_SCORE = 0.9
+OTHER_CITY_SCORE = 0.2
 
 
 @dataclass(frozen=True)
@@ -178,17 +185,31 @@ def score_hotel_offers(
             )
 
         # Whether the hotel is in the district the plan mostly sits in. Both sides must be
-        # known: a hotel with no district is not "elsewhere", it is uncompared.
+        # known: a hotel with no district is not "elsewhere", it is uncompared. The names are
+        # folded for the same reason the city names are — the two providers describe a district
+        # at different granularities (OSM's `suburb` is 「西湖街道」, 高德's `businessarea` is
+        # 「西湖」), so comparing them literally asks whether two sources happened to spell it
+        # identically rather than whether they meant the same place.
         same_district: bool | None = None
-        if geography is not None and geography.main_district and hotel.location.district:
-            same_district = hotel.location.district == geography.main_district
+        if geography is not None:
+            same_district = same_place_name(hotel.location.district, geography.main_district)
 
         measured: dict[str, float] = {
             "price": max(0.0, 1.0 - float(offer.total_price) / max_price),
             "rating": (hotel.rating or 0) / 5,
-            "itinerary_fit": 0.9 if hotel.location.city == profile.destination else 0.2,
             "user_preference": _preference_score(profile),
         }
+        # `itinerary_fit` asks "is this hotel in the city the trip is about", and comparing the
+        # two names by equality does not answer it. The traveller types 丽江; Nominatim reports
+        # `address.city == "丽江市"`, while 高德 is queried with the traveller's own text and
+        # echoes it back. So equality said "a different city" for every free-source hotel and
+        # "the same city" for every 高德 one: the identical hotel scored 0.2 or 0.9 depending on
+        # whether a key was configured, which means adding a key silently reordered the
+        # recommendations. `same_place_name` compares what the names have in common and returns
+        # None when either is absent, which is not the same as a different name.
+        same_city = same_place_name(hotel.location.city, profile.destination)
+        if same_city is not None:
+            measured["itinerary_fit"] = SAME_CITY_SCORE if same_city else OTHER_CITY_SCORE
         transit = (
             None
             if distance_meters is None
@@ -210,29 +231,25 @@ def score_hotel_offers(
         total_weight = sum(by_dimension[name] for name in measured)
         score = sum(measured[name] * by_dimension[name] for name in measured) / total_weight
 
-        breakdown = ScoreBreakdown(
-            price=measured["price"],
-            location=location,
-            transit=transit,
-            rating=measured["rating"],
-            itinerary_fit=measured["itinerary_fit"],
-            user_preference=measured["user_preference"],
-        )
+        # Built *from* `measured` rather than written out by hand, so the breakdown and the sum
+        # cannot disagree. The hand-written version is how `itinerary_fit` came to be dropped
+        # from the sum while the model still required it: a KeyError at best, and at worst a
+        # breakdown reporting a dimension that was never part of the decision. A dimension that
+        # was not measured is simply absent here, and the model reads that as `None`.
+        breakdown = ScoreBreakdown(**measured)
         decisions.append(
             CandidateDecision(
                 candidate_id=offer.id,
                 score=round(score, 6),
                 score_breakdown=breakdown,
-                matched_constraints=_matched_constraints(
-                    transit_measured=transit is not None,
-                    location_measured=location is not None,
-                ),
+                matched_constraints=_matched_constraints(measured),
                 failed_constraints=[],
                 explanations=_explanations(
                     offer=offer,
                     hotel=hotel,
                     distance_meters=distance_meters,
                     same_district=same_district,
+                    same_city=same_city,
                     main_district=geography.main_district if geography else None,
                 ),
             )
@@ -251,18 +268,24 @@ def _preference_score(profile: TripProfile) -> float:
     return 1.0 if "地铁" in preference_text or "交通" in preference_text else 0.6
 
 
-def _matched_constraints(*, transit_measured: bool, location_measured: bool) -> list[str]:
-    """The dimensions that were actually satisfiable, named.
+def _matched_constraints(measured: dict[str, float]) -> list[str]:
+    """The dimensions that were actually satisfiable, named, derived from what was measured.
+
+    Keyed off ``measured`` rather than off separately-passed flags, so the constraint list
+    cannot claim a dimension the score did not use — which is the failure mode this whole
+    module is recovering from.
 
     The unmeasurable ones are **left out rather than listed**. A constraint list that named
     "fresh offer" alongside "no centre to compare against" would read as though the second had
     been checked and passed.
     """
     matched = ["hotel budget", "date range", "availability", "fresh offer"]
-    if transit_measured:
+    if "transit" in measured:
         matched.append("walkable to the plan's centre")
-    if location_measured:
+    if "location" in measured:
         matched.append("district compared against the plan")
+    if "itinerary_fit" in measured:
+        matched.append("same city as the trip")
     return matched
 
 
@@ -272,6 +295,7 @@ def _explanations(
     hotel: Hotel,
     distance_meters: float | None,
     same_district: bool | None,
+    same_city: bool | None,
     main_district: str | None,
 ) -> list[str]:
     """The sentences a reader sees for one offer.
@@ -295,4 +319,11 @@ def _explanations(
         # The district name is quoted rather than described, so the reader can check it.
         relation = "相同" if same_district else "不同"
         lines.append(f"所在城区与行程主要城区（{main_district}）{relation}")
+
+    if same_city is None:
+        lines.append(f"酒店没有上报所在城市，无法与目的地（{hotel.location.city or '未知'}）比较")
+    elif not same_city:
+        # Only said when it is a *finding*. Saying "different city" is a claim about the hotel,
+        # and the reader deciding between offers should be told when one is somewhere else.
+        lines.append(f"所在城市（{hotel.location.city}）与目的地不同")
     return lines

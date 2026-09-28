@@ -587,28 +587,37 @@ class TripProfile(BaseModel):
 class ScoreBreakdown(BaseModel):
     """One decision's dimensions, each either measured or explicitly absent.
 
-    ``transit`` and ``location`` are optional because they depend on the plan having located
-    points to compare against, and there are plans that have none. ``None`` means **not
-    measured** and is deliberately not spelled ``0.0``: a zero reads as "worst possible",
-    which is a measurement, and a reader — or a later scorer — cannot tell the two apart from
-    the value alone.
+    Every dimension that can be missing is optional, and ``None`` means **not measured**. This
+    is deliberately not spelled ``0.0``: a zero reads as "worst possible", which is a
+    measurement, and neither a reader nor a later scorer can tell the two apart from the value.
 
-    The other four are always computable: the price comes from the offer, the rating from the
-    hotel, and the last two from the profile. So they are required, and a missing one is a bug
-    rather than a fact about the data.
+    The rule that keeps this honest: **a dimension the scorer dropped from its weighted sum
+    must be ``None`` here, and a dimension it included must be present.** The scorer normalises
+    its total over exactly the dimensions it could compute, so a breakdown claiming a value for
+    a dimension that was not in the sum would describe a decision that was not made. There is a
+    test for that correspondence rather than a comment, because the two lists live in different
+    places.
+
+    All six are optional because all six can in principle be unmeasurable: the price needs an
+    offer, the rating needs the source to have published one, and the other four need the plan
+    to have located something.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    price: float
+    price: float | None = None
     #: Whether the hotel is in the district the plan mostly sits in. ``None`` when either side
     #: has no district, which is not the same as "a different district".
     location: float | None = None
     #: Distance to the plan's own centre. ``None`` when the plan located no points.
     transit: float | None = None
-    rating: float
-    itinerary_fit: float
-    user_preference: float
+    #: The source's own rating, normalised. ``None`` when no source published one — OSM's
+    #: ``stars`` is a classification, not a guest rating, and is deliberately not used here.
+    rating: float | None = None
+    #: Whether the hotel is in the city the trip is about. ``None`` when the hotel's city is
+    #: absent, which is missing data rather than evidence of another city.
+    itinerary_fit: float | None = None
+    user_preference: float | None = None
 
 
 class CandidateDecision(BaseModel):

@@ -158,6 +158,46 @@ def test_the_district_is_compared_against_the_plans_district_not_a_hardcoded_one
     assert scores[hotels[1].id] == OTHER_DISTRICT_SCORE, "an 上城区 hotel is not"
 
 
+def test_the_district_comparison_folds_the_two_spellings_the_providers_use():
+    """Overpass and 高德 name the same district differently, so equality is the wrong question.
+
+    Overpass fills a place's ``district`` from OSM's ``suburb`` (「西湖街道」); 高德 fills it
+    from ``businessarea`` (「西湖」). Compared literally, a hotel in the district the trip is
+    about scores as if it were in another one — and, as with the city, which answer you get
+    depends on which provider was configured rather than on the hotel.
+
+    This test was added because a mutation that restored raw equality for the district passed
+    every other test in this file: they all used the *same* spelling on both sides, so folding
+    made no observable difference. A comparison between two vocabularies has to be tested
+    across the vocabularies.
+    """
+    # OSM's `suburb` spelling, against the plan's 高德 `businessarea` spelling below.
+    overpass_spelling = "西湖街道"
+    hotels, offers = _hotels(first_district=overpass_spelling, second_district=SHANGCHENG)
+
+    # The plan's points are described the way 高德 describes them; the hotels the way OSM does.
+    geography = plan_geography(
+        [
+            Location(
+                address=f"p{index}",
+                city="杭州",
+                district=district,
+                coordinates=Coordinates(latitude=30.24 + index / 100, longitude=120.10),
+            )
+            # 西湖区 twice and 上城区 once, so the plan is mostly in 西湖区.
+            for index, district in enumerate((XIHU, XIHU, SHANGCHENG))
+        ]
+    )
+    assert geography.main_district == XIHU
+
+    decisions = score_hotel_offers(hotels, offers, _profile(), geography=geography)
+    by_offer = {decision.candidate_id: decision for decision in decisions}
+    assert by_offer[offers[0].id].score_breakdown.location == SAME_DISTRICT_SCORE, (
+        f"{overpass_spelling} and {XIHU} are the same district; comparing them literally says otherwise"
+    )
+    assert by_offer[offers[1].id].score_breakdown.location == OTHER_DISTRICT_SCORE
+
+
 def test_an_unmeasurable_dimension_is_absent_rather_than_zero():
     """A plan with no located points cannot have a transit or location score.
 
@@ -274,3 +314,112 @@ def test_no_offers_means_no_decisions():
     """The empty case, which the budget path depends on."""
     hotels, _ = build_hotels("ctrip-mock")
     assert score_hotel_offers(hotels, [], _profile()) == []
+
+
+def test_the_breakdown_reports_exactly_the_dimensions_that_were_scored():
+    """The invariant that broke when the breakdown was written out by hand.
+
+    The scorer normalises its weighted sum over the dimensions it could measure, then builds
+    the breakdown. Those are two lists in two places, and originally the second was written out
+    literally — which is how `itinerary_fit` came to be dropped from the sum while the model
+    still required it. A ``KeyError`` is the lucky outcome; the unlucky one is a breakdown that
+    reports a dimension the decision did not use, and a reader who then believes the ranking
+    took it into account.
+
+    So: recompute the score from the breakdown, using only the dimensions it actually contains,
+    and require it to reproduce the stored score. If the breakdown claims a dimension the sum
+    skipped (or omits one it used), the arithmetic will not match.
+    """
+    weights = DecisionWeights()
+    by_dimension = weights.by_dimension()
+
+    for geography in (plan_geography([]), None):
+        hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG)
+        decisions = score_hotel_offers(
+            hotels,
+            offers,
+            _profile(),
+            weights=weights,
+            geography=(
+                geography
+                if geography is None
+                else plan_geography([hotel.location for hotel in hotels])
+            ),
+        )
+        assert decisions
+
+        for decision in decisions:
+            reported = {
+                name: value
+                for name, value in decision.score_breakdown.model_dump().items()
+                if value is not None
+            }
+            total_weight = sum(by_dimension[name] for name in reported)
+            recomputed = (
+                sum(reported[name] * by_dimension[name] for name in reported) / total_weight
+            )
+            assert decision.score == pytest.approx(recomputed, abs=1e-6), (
+                f"the breakdown {sorted(reported)} does not reproduce the stored score; "
+                "a dimension was scored without being reported, or reported without being scored"
+            )
+
+
+def test_each_optional_dimension_is_absent_exactly_when_it_cannot_be_measured():
+    """Per-dimension, so a failure names which one drifted.
+
+    The aggregate check above would pass if a dimension were added to both lists together and
+    wrongly populated, so this pins what ``None`` is supposed to mean for each field.
+    """
+    hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG)
+    located = plan_geography([hotel.location for hotel in hotels])
+
+    with_geography = score_hotel_offers(hotels, offers, _profile(), geography=located)
+    assert with_geography
+    for decision in with_geography:
+        assert decision.score_breakdown.transit is not None
+        assert decision.score_breakdown.location is not None
+        assert decision.score_breakdown.itinerary_fit is not None
+
+    without = score_hotel_offers(hotels, offers, _profile(), geography=plan_geography([]))
+    assert without
+    for decision in without:
+        # No located points: no centre, and no district to compare against.
+        assert decision.score_breakdown.transit is None
+        assert decision.score_breakdown.location is None
+        # But the city is still on the hotel, so this one is unaffected by the missing plan
+        # geography — which is exactly the distinction the aggregate check cannot see.
+        assert decision.score_breakdown.itinerary_fit is not None
+
+    no_city = [
+        hotels[0],
+        hotels[1].model_copy(
+            update={"location": hotels[1].location.model_copy(update={"city": ""})}
+        ),
+    ]
+    decisions = score_hotel_offers(no_city, offers, _profile(), geography=located)
+    by_offer = {decision.candidate_id: decision for decision in decisions}
+    assert by_offer[offers[0].id].score_breakdown.itinerary_fit is not None
+    assert by_offer[offers[1].id].score_breakdown.itinerary_fit is None
+
+
+def test_the_constraint_list_names_only_dimensions_that_were_scored():
+    """`matched_constraints` must not claim a check that did not happen.
+
+    A list saying "walkable to the plan's centre" beside an offer whose transit score is `None`
+    reads as though proximity was verified. It is the same failure as the freshness panels:
+    an absent check presented as a passed one.
+    """
+    hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG)
+
+    located = score_hotel_offers(
+        hotels, offers, _profile(), geography=plan_geography([h.location for h in hotels])
+    )
+    unlocated = score_hotel_offers(hotels, offers, _profile(), geography=plan_geography([]))
+
+    for decision in located:
+        assert any("centre" in item for item in decision.matched_constraints)
+    for decision in unlocated:
+        assert not any("centre" in item for item in decision.matched_constraints), (
+            "the constraint list claims a proximity check that could not be made"
+        )
+        assert not any("district" in item for item in decision.matched_constraints)
