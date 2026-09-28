@@ -8,14 +8,21 @@ Provider 只需声明它**真正能提供**的能力，不需要实现完整接�
 
 | 能力 Protocol | 方法 |
 |---|---|
-| `HotelProvider` | `search_hotels(profile)`、`search_room_offers(hotel_ids, profile)` |
+| `HotelProvider` | `search_hotels(profile)` |
+| `RoomOfferProvider` | `search_room_offers(hotel_ids, profile)` |
 | `FoodProvider` | `search_restaurants(profile)` |
 | `AttractionProvider` | `search_attractions(profile)` |
 | `RouteProvider` | `calculate_routes(profile, points: list[RoutePoint])` |
 | `WeatherProvider` | `search_weather(profile)` |
+| `HolidayProvider` | `search_holidays(profile)` |
+| `ContentProvider` | `enrich_attractions(attractions, profile)` |
+| `PlaceResolverProvider` | `resolve_places(names, profile)` |
 | `HealthProvider` | `health()` |
 
 `CAPABILITY_BY_METHOD` 维护方法名到能力的映射。这样地理数据源（OpenStreetMap）不必伪造它没有的商业数据，天气数据源也不必返回空的酒店列表。未知方法会回退到全部 Provider。`TravelProvider` 是全能力 Protocol，保留给有意覆盖所有类别的 mock/fixture Provider。
+
+`PlaceResolverProvider.resolve_places` **刻意不接收中心点或目的地坐标**。地名消歧需要目的地，而把它作为参数传进来，就等于让每个实现在「用哪个坐标核对距离」和「用哪个坐标限定查询范围」上各自作主——同一个笔记会在两个来源下得到两个答案，而两边都不会显示它们不一致。目的地由实现自己从 `profile` 取得（共用一个 `GeoResolver`），判断逻辑则统一在 `providers/place_matching.py`。这也是唯一一个**输入不是 `profile` 单参数**的协议：它要多一组地名。
+
 
 所有方法返回结构化 `ProviderResult`，包含 `status`、`provider`、`source_references`、`data`、`errors`。返回空数据集是一个**成功**结果，不是错误——这一点让"OSM 没有房价"能被诚实表达。
 
@@ -24,8 +31,11 @@ Provider 只需声明它**真正能提供**的能力，不需要实现完整接�
 默认启用的是免费免密钥数据层（见 [free-sources.md](../providers/free-sources.md)）：
 
 - `openstreetmap`（Overpass API）— 酒店、餐厅、景点
+- `openstreetmap-places`（Open-Meteo Geocoding + Nominatim）— 把笔记里提到的地名落到坐标上
 - `open-meteo` — 天气预报
 - `osrm` — 路线矩阵
+- `holidays` — 公共节假日
+- `wikipedia` — 景点简介
 
 `FREE_PROVIDERS_ENABLED=true`、`MOCK_PROVIDER_ENABLED=false` 是默认值，因此默认运行使用真实数据，合成数据不会静默混入。离线与确定性测试显式地反过来设置。
 

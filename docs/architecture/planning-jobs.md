@@ -42,6 +42,7 @@ POST /api/v1/trips/{trip_id}/refresh/jobs   → 202 + 同一个 job 结构
 | `collect_places` | 酒店、餐厅、景点、天气、节假日 | 五个能力并发 |
 | `room_offers` | N 家酒店 / 无候选酒店，跳过 | 即使跳过也报出，这样步骤列表形状稳定，「没有这一步」不会被误读成静默失败 |
 | `enrich_attractions` | N 个景点 / 跳过 | 只对带 OSM wikipedia/wikidata 链接的景点执行 |
+| `resolve_places` | N 个文中提到的地点 / 无未匹配的地名，跳过 | 只查笔记里提到、而我们的来源没有的地点；结果不会变成景点，也不会被排进行程 |
 | `calculate_routes` | N 个途经点 / 途经点不足，跳过 | 通常是最慢的一步，也是整个机制存在的理由 |
 | `build_itinerary` | 预算与每日路线 | |
 | `collect_health` | 各数据源状态 | |
