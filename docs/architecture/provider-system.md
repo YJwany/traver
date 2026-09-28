@@ -52,7 +52,8 @@ Traver 定位是"汇总工具"：它自己不带任何数据，也不绑定任�
 1. 清单声明的每个能力，都必须是 `CAPABILITY_BY_METHOD` 真能路由的方法；
 2. 无需凭据的源，声明的每个 provider 名都必须真的被 `build_free_providers()` 注册；
 3. 需要凭据的源，声明的 provider 名必须真的由它自己的工厂构造出来（比对比常量更强：同时证明工厂还能跑）；
-4. 声明 `aspects` 的能力必须自己也声明了该能力，且 aspect 名必须在 `CAPABILITY_ASPECTS` 里。
+4. 声明 `aspects` 的能力必须自己也声明了该能力，且 aspect 名必须在 `CAPABILITY_ASPECTS` 里；
+5. **每个已声明能力都必须真的能路由到该来源的 Provider**（向 `providers_for()` 提问，而不是比对名字）。第 1–4 条只检查名字与清单是否自洽，第 5 条才检查"调用能不能到达实现"。
 
 每个可用源还必须声明自己的**时效性**（有测试强制）。原因见 [realtime-data.md](realtime-data.md)：旅游攻略面向未来，只能用近期数据。
 
@@ -69,6 +70,25 @@ Traver 定位是"汇总工具"：它自己不带任何数据，也不绑定任�
 属主如何传到深处？AI 工具路径（`ToolOrchestrator` → handler → `trip_service.preview()`）的 handler 签名是**对外发布的 OpenAI 工具契约**，没有位置新增 `owner_id` 参数。因此属主用 `ContextVar` 承载（`services/owner_context.py`），由中间件在解析出 principal 后绑定、请求结束时 reset。
 
 这里有一个必须记住的区别：`None` 表示"未指定"，`""` 表示**匿名属主**（认证关闭时的真实属主 id）。把 `""` 当成"未指定"去回退到环境属主，就是把别人的 Key 递给匿名请求。`resolve_owner()` 只在参数为 `None` 时才回退。
+
+### 一个 Provider 一个名字
+
+注册表以 **provider `name` 为键**，因此同一个名字只能有一个 Provider。高德最初把路由、POI、天气三个 Provider 都命名为 `"amap"`，注册时**只有最后一个活下来，另外两个被静默丢弃**——没有任何异常，没有日志。更糟的是能力矩阵当时只依据清单的**声明**判定覆盖，于是它继续显示"公交/地铁 ✓ 已覆盖"，而实际上根本不存在能执行它的路由 Provider。
+
+两个修正都保留了：
+
+1. 三个 Provider 各有名字（`amap-routing` / `amap-places` / `amap-weather`），`AMAP_PROVIDER_ID` 仍作为**来源** id 用于凭据与清单；
+2. 矩阵改为向注册表**实际询问**每个能力有哪些 Provider 在用（`registry.providers_for()`），而不是从声明的名字推断。于是"声明了但没接上"必然显示为缺口。
+
+这条规则不是高德特有的：注册表本来就假定一个名字对应一个实现（`openstreetmap` / `osrm` / `open-meteo`），高德只是第一个违反它的源。
+
+### 找到酒店不等于能给房价
+
+`CAPABILITY_BY_METHOD["search_hotels"]` 原先指向一个**同时要求** `search_room_offers` 的 Protocol。高德能列出酒店 POI 却没有房价，于是它连 `isinstance` 都过不了，**酒店搜索根本无法路由到它**——清单声明了 `search_hotels`，而调用永远到不了。声明、实现、路由三者单独看全都正确，只有向注册表提问才会暴露。
+
+因此能力与 Protocol 拆开了：`search_hotels` → `HotelProvider`（只要能找酒店），`search_room_offers` → `RoomOfferProvider`（专管报价）。缺房价的源不会被询价，也不会因此失去酒店搜索；预算层照旧把这类成本标为估算。
+
+有一条防漂移测试直接问注册表这个问题：清单里每个已实现来源声明的每个能力，`providers_for()` 都必须返回该来源的 Provider。上面两个 bug 都会被它一次抓住。
 
 ### 局部覆盖不等于完整覆盖（aspects）
 

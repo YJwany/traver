@@ -202,3 +202,17 @@ results[] { origin_id, dest_id, distance, duration }
 | 酒店**房价** | 无 | **也没有**——高德只提供酒店 POI，不提供房价 |
 
 最后一行是刻意写明的：高德的 `search_hotels` 能力指的是**找到酒店**，不是**给出房价**。因此清单里高德不声明 `search_room_offers`，避免用「能找到酒店」暗示「有实时房价」。
+
+## 三个 Provider，三个注册名
+
+`build_amap_providers()` 返回三个对象，各自有独立的注册名：
+
+| 注册名 | 能力 |
+|---|---|
+| `amap-routing` | `calculate_routes`（驾车 / 公交地铁 / 步行） |
+| `amap-places` | `search_hotels`、`search_restaurants`、`search_attractions` |
+| `amap-weather` | `search_weather` |
+
+不能共用 `"amap"`：注册表以名字为键，共用会让**只有最后一个被注册，其余被静默丢弃**——没有异常、没有日志，规划只是数据变少。`AMAP_PROVIDER_ID = "amap"` 仍是**来源** id（设置页与清单用它），`provider_names` 则列出上面三个真实注册名。
+
+三个对象共享一个 `AmapClient` 与一个 `AmapGeocoder`：共享客户端才能共享限速与连接池；共享地理编码器意味着一次行程只解析一次城市（天气端点要 `adcode`，只有地理编码能给）。

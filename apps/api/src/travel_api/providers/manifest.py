@@ -20,9 +20,10 @@ designed is marked ``planned`` and contributes nothing to the capability matrix.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from travel_api.providers.amap import AMAP_PROVIDER_NAMES
 from travel_api.providers.base import CAPABILITY_BY_METHOD
 
 #: Human labels for the registry methods, used by the settings UI. Kept beside
@@ -249,7 +250,7 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
                 required=False,
             ),
         ),
-        provider_names=("amap",),
+        provider_names=AMAP_PROVIDER_NAMES,
         #: Only three aspects, not four. ``TravelMode`` has no cycling member and
         #: ``mode_for_pace`` cannot return one, so nothing can ever request a cycling
         #: route: claiming it would put a capability in the matrix that no
@@ -346,19 +347,59 @@ def _is_active(manifest: ProviderManifest, registered: set[str], present: set[st
     return manifest.status == STATUS_AVAILABLE
 
 
-def _active_providers_for(capability: str, registered: set[str]) -> list[str]:
+def _serves_capability_now(
+    manifest: ProviderManifest,
+    capability: str,
+    registered: set[str],
+    live: Mapping[str, set[str]] | None,
+) -> bool:
+    """Whether this source can serve ``capability`` *right now*.
+
+    ``registered`` alone is not enough, and getting this wrong is how the matrix
+    overstates. A source declares several capabilities but may register several
+    providers to cover them; if only some of those providers are live, crediting the
+    whole declaration would advertise a capability nothing can execute. That is not
+    hypothetical — 高德's three providers once shared one registry name, so two were
+    dropped on registration while the matrix, reading only the declaration, kept
+    reporting 公交/地铁 as covered.
+
+    ``live`` maps a capability to the names of the providers that actually implement
+    it (derived from the registry's own capability routing, so it cannot drift from
+    the code). When it is given, a source counts only if one of its provider names is
+    among them. When it is not, the coarser name-overlap test is used, which keeps
+    the pure-manifest callers working.
+
+    Sources with no ``provider_names`` — models and ingestors — are not provider
+    backed and are gated elsewhere, by their activation credentials.
+    """
+    if not manifest.provider_names:
+        return True
+    if live is None:
+        return bool(set(manifest.provider_names) & registered)
+    return bool(set(manifest.provider_names) & live.get(capability, set()))
+
+
+def _active_providers_for(
+    capability: str,
+    registered: set[str],
+    live: Mapping[str, set[str]] | None = None,
+) -> list[str]:
     """Implemented manifests with a live provider that serve ``capability``."""
     active: list[str] = []
     for manifest in PROVIDER_CATALOG:
         if not manifest.is_usable or capability not in manifest.capabilities:
             continue
-        if manifest.provider_names and not (set(manifest.provider_names) & registered):
+        if not _serves_capability_now(manifest, capability, registered, live):
             continue
         active.append(manifest.id)
     return active
 
 
-def _aspect_rows(capability: str, registered: set[str]) -> list[dict]:
+def _aspect_rows(
+    capability: str,
+    registered: set[str],
+    live: Mapping[str, set[str]] | None = None,
+) -> list[dict]:
     """Per-aspect coverage for a capability that decomposes.
 
     Empty for an atomic capability, so callers can treat "no aspects" and "not
@@ -373,7 +414,7 @@ def _aspect_rows(capability: str, registered: set[str]) -> list[dict]:
         for manifest in PROVIDER_CATALOG:
             if not manifest.is_usable or capability not in manifest.capabilities:
                 continue
-            if manifest.provider_names and not (set(manifest.provider_names) & registered):
+            if not _serves_capability_now(manifest, capability, registered, live):
                 continue
             served = dict(manifest.aspects).get(capability, ())
             if aspect in served:
@@ -389,13 +430,23 @@ def _aspect_rows(capability: str, registered: set[str]) -> list[dict]:
     return rows
 
 
-def capability_matrix(registered_names: Iterable[str]) -> list[dict]:
+def capability_matrix(
+    registered_names: Iterable[str],
+    live_providers: Mapping[str, set[str]] | None = None,
+) -> list[dict]:
     """Which capabilities are reachable, and what would unlock the rest.
 
     ``registered_names`` are the provider ``name`` values actually present in the
     running registry. A capability counts as covered only when an *implemented*
     manifest that serves it also has a provider registered — so this reports what
     the process can do now, not what the catalogue mentions.
+
+    ``live_providers`` optionally maps each capability to the names of the providers
+    that genuinely implement it, taken from the registry's own routing. Supplying it
+    tightens the check from "one of this source's providers is registered" to "a
+    provider that can actually serve *this* capability is registered", which is what
+    stops a partially registered source from being credited with everything it
+    declared. Callers that only have names may omit it.
 
     For a capability that decomposes (``CAPABILITY_ASPECTS``), ``covered`` means
     *at least one* aspect is served and ``complete`` means all of them are. The
@@ -406,8 +457,8 @@ def capability_matrix(registered_names: Iterable[str]) -> list[dict]:
     registered = set(registered_names)
     matrix: list[dict] = []
     for capability in CAPABILITY_ORDER:
-        active = _active_providers_for(capability, registered)
-        aspects = _aspect_rows(capability, registered)
+        active = _active_providers_for(capability, registered, live_providers)
+        aspects = _aspect_rows(capability, registered, live_providers)
         missing = [row["aspect"] for row in aspects if not row["covered"]]
         matrix.append(
             {
@@ -424,7 +475,10 @@ def capability_matrix(registered_names: Iterable[str]) -> list[dict]:
     return matrix
 
 
-def uncovered_aspects(registered_names: Iterable[str]) -> list[dict]:
+def uncovered_aspects(
+    registered_names: Iterable[str],
+    live_providers: Mapping[str, set[str]] | None = None,
+) -> list[dict]:
     """Parts of a covered capability that nothing serves.
 
     Separate from ``uncovered_capabilities`` on purpose. A missing capability means
@@ -434,7 +488,7 @@ def uncovered_aspects(registered_names: Iterable[str]) -> list[dict]:
     planned as if driving were the only option.
     """
     gaps: list[dict] = []
-    for row in capability_matrix(registered_names):
+    for row in capability_matrix(registered_names, live_providers):
         for aspect in row["aspects"]:
             if not aspect["covered"]:
                 gaps.append(

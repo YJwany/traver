@@ -31,7 +31,11 @@ from travel_api.providers.amap.weather import AmapWeatherProvider
 
 __all__ = [
     "AMAP_KEY_CREDENTIAL",
+    "AMAP_PLACE_PROVIDER_NAME",
     "AMAP_PROVIDER_ID",
+    "AMAP_PROVIDER_NAMES",
+    "AMAP_ROUTING_PROVIDER_NAME",
+    "AMAP_WEATHER_PROVIDER_NAME",
     "DEFAULT_AMAP_BASE_URL",
     "AmapClient",
     "AmapError",
@@ -46,6 +50,27 @@ __all__ = [
     "build_amap_providers",
 ]
 
+#: Registry names for the providers 高德 backs.
+#:
+#: Three distinct names rather than one shared ``"amap"``, because the registry keys
+#: providers by name. Three objects sharing a name meant only the last one survived
+#: registration — the routing and POI providers were silently discarded, so a keyed
+#: deployment still planned keyless while the capability matrix, which is driven by
+#: the manifest's *declaration*, went on advertising 公交/地铁 as covered. One name
+#: per provider is what the rest of the registry assumes (openstreetmap, osrm,
+#: open-meteo), so 高德 follows the same rule.
+#:
+#: ``AMAP_PROVIDER_ID`` remains the single *source* id: it is what the settings page
+#: writes credentials against and what the manifest describes.
+AMAP_ROUTING_PROVIDER_NAME = "amap-routing"
+AMAP_PLACE_PROVIDER_NAME = "amap-places"
+AMAP_WEATHER_PROVIDER_NAME = "amap-weather"
+AMAP_PROVIDER_NAMES: tuple[str, ...] = (
+    AMAP_ROUTING_PROVIDER_NAME,
+    AMAP_PLACE_PROVIDER_NAME,
+    AMAP_WEATHER_PROVIDER_NAME,
+)
+
 
 def build_amap_providers(
     *,
@@ -54,7 +79,6 @@ def build_amap_providers(
     base_url: str = DEFAULT_AMAP_BASE_URL,
     timeout_seconds: float = 30.0,
     ttl_seconds: int = 300,
-    name: str = AMAP_PROVIDER_ID,
 ) -> list[Any]:
     """Build the AMap-backed providers for one owner's key.
 
@@ -62,6 +86,10 @@ def build_amap_providers(
     per-capability, so routing, POI search and weather are separate classes; they are
     grouped here because they share a key, a base URL and a rate limit, and splitting
     the client would multiply the requests each one independently throttles.
+
+    Each gets its own registry name (see ``AMAP_PROVIDER_NAMES``). They must not
+    share one: the registry is keyed by name, so a shared name would keep only the
+    last provider and drop the rest without any error.
 
     The geocoder is shared with the weather provider because AMap's weather endpoint
     is keyed by ``adcode``, which only the geocoder can produce. Passing the same
@@ -78,10 +106,20 @@ def build_amap_providers(
         timeout_seconds=timeout_seconds,
     )
     # No cache TTL: AMap's terms forbid storing results, so geocoding is live too.
-    geocoder = AmapGeocoder(client, name=name)
+    geocoder = AmapGeocoder(client, name=AMAP_PLACE_PROVIDER_NAME)
 
     return [
-        AmapRoutingProvider(client, name=name, ttl_seconds=ttl_seconds),
-        AmapPlaceProvider(client, name=name, ttl_seconds=ttl_seconds, geocoder=geocoder),
-        AmapWeatherProvider(client, name=name, ttl_seconds=ttl_seconds, geocoder=geocoder),
+        AmapRoutingProvider(client, name=AMAP_ROUTING_PROVIDER_NAME, ttl_seconds=ttl_seconds),
+        AmapPlaceProvider(
+            client,
+            name=AMAP_PLACE_PROVIDER_NAME,
+            ttl_seconds=ttl_seconds,
+            geocoder=geocoder,
+        ),
+        AmapWeatherProvider(
+            client,
+            name=AMAP_WEATHER_PROVIDER_NAME,
+            ttl_seconds=ttl_seconds,
+            geocoder=geocoder,
+        ),
     ]

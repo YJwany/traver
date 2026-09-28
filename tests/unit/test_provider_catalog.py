@@ -97,6 +97,133 @@ def _credentialed_stack_names() -> set[str]:
     return {getattr(provider, "name", "") for provider in providers}
 
 
+def _amap_stack() -> list:
+    from travel_api.providers.amap import build_amap_providers
+
+    return build_amap_providers(key="test-key-not-used-for-requests", http=object())
+
+
+def test_every_declared_capability_reaches_a_live_provider_that_implements_it():
+    """The end-to-end anti-drift check: declaration must imply reachability.
+
+    Every earlier test here compares names and protocols. This one asks the registry
+    the question the planner asks — "give me the providers for this capability" — and
+    requires a non-empty answer for each capability an implemented source declares.
+
+    This is the check that would have caught 高德's hotel POIs being unreachable:
+    ``search_hotels`` was declared, and the provider implemented the method, but
+    ``CAPABILITY_BY_METHOD`` pointed at a protocol that also required room rates, so
+    ``providers_for("search_hotels")`` returned nothing. Declaration, implementation
+    and routing all looked correct in isolation; only asking the registry exposed it.
+    """
+    from travel_api.providers.registry import ProviderRegistry
+
+    providers, _http = build_free_providers()
+    registry = ProviderRegistry([*providers, *_amap_stack()])
+
+    unreachable: list[str] = []
+    for manifest in PROVIDER_CATALOG:
+        if not manifest.is_usable or not manifest.provider_names:
+            continue
+        for capability in manifest.capabilities:
+            served = registry.providers_for(capability)
+            if not any(
+                getattr(provider, "name", "") in manifest.provider_names for provider in served
+            ):
+                unreachable.append(f"{manifest.id}:{capability}")
+
+    assert not unreachable, (
+        "declared capabilities that no live provider is routed for, so the matrix "
+        f"would advertise them while nothing can execute them: {sorted(unreachable)}"
+    )
+
+
+def test_a_source_that_lists_hotels_without_rates_is_still_routed_hotels():
+    """Finding hotels and pricing them are separate abilities, and were not.
+
+    ``CAPABILITY_BY_METHOD["search_hotels"]`` used to point at a protocol that also
+    demanded ``search_room_offers``. A source that could list hotels but had no rates
+    — which is exactly 高德, whose hotel POIs come with no prices — therefore failed
+    the ``isinstance`` check and was never routed for hotels at all. Its manifest
+    advertised ``search_hotels`` while the call could never reach it: a capability
+    that existed only on paper.
+
+    Both directions are asserted, because the fix must not go the other way either:
+    a source with no rates must not be handed a request for rates.
+    """
+    from travel_api.providers.base import CAPABILITY_BY_METHOD, HotelProvider, RoomOfferProvider
+    from travel_api.providers.registry import ProviderRegistry
+
+    hotel_only = _amap_stack()[1]  # the POI provider: hotels, restaurants, attractions
+    assert isinstance(hotel_only, HotelProvider)
+    assert not isinstance(hotel_only, RoomOfferProvider), (
+        "高德 returns hotel POIs and no room rates; claiming otherwise would let the "
+        "budget layer present an invented price as a real one"
+    )
+
+    registry = ProviderRegistry([hotel_only])
+    assert registry.providers_for("search_hotels") == [hotel_only]
+    assert registry.providers_for("search_room_offers") == []
+
+    # And the mapping itself must keep them apart; pointing both at one protocol is
+    # the specific mistake this test exists to catch.
+    assert CAPABILITY_BY_METHOD["search_hotels"] is not CAPABILITY_BY_METHOD["search_room_offers"]
+
+
+def test_a_sources_providers_do_not_share_one_registry_name():
+    """The registry is keyed by name, so a shared name silently drops providers.
+
+    高德's routing, POI and weather providers were all named ``"amap"``. Registering
+    them therefore kept only the last one and discarded the other two *without any
+    error* — and because the capability matrix was driven by the manifest's
+    declaration rather than by what actually registered, the catalogue went on
+    reporting 公交/地铁 as covered while no routing provider existed to serve it.
+
+    Nothing failed. A keyed deployment simply planned with less data than it
+    advertised, which is the exact failure this project's honesty rules exist to
+    prevent. Distinct names are what the registry assumes of every other source, so
+    this asserts the invariant directly rather than waiting for a plan to be slow or
+    a matrix to be wrong.
+    """
+    names = [getattr(provider, "name", None) for provider in _amap_stack()]
+
+    assert all(names), f"every provider needs a name, got {names}"
+    assert len(set(names)) == len(names), (
+        f"providers share a registry name, so some would be dropped: {names}"
+    )
+
+
+def _amap_stack() -> list:
+    from travel_api.providers.amap import build_amap_providers
+
+    return build_amap_providers(key="test-key-not-used-for-requests", http=object())
+
+
+def test_the_matrix_does_not_credit_a_capability_with_no_live_provider():
+    """A source must not be credited with capabilities it cannot currently serve.
+
+    The check is tightened by passing which providers are genuinely live per
+    capability, as the catalogue route now does from the registry itself. Here the
+    weather provider alone is live: 高德's weather is covered, but its routing and
+    POI capabilities must be reported as gaps rather than inherited from the same
+    declaration.
+    """
+    from travel_api.providers.amap import AMAP_WEATHER_PROVIDER_NAME
+
+    live = {"search_weather": {AMAP_WEATHER_PROVIDER_NAME}}
+    matrix = {
+        row["capability"]: row for row in capability_matrix([AMAP_WEATHER_PROVIDER_NAME], live)
+    }
+
+    assert matrix["search_weather"]["covered"] is True
+    # The other 高德 capabilities are declared by the same manifest, but nothing live
+    # serves them, so they must not be reported as covered.
+    assert matrix["search_hotels"]["covered"] is False
+    assert matrix["search_hotels"]["providers"] == []
+    assert matrix["calculate_routes"]["covered"] is False
+    assert "transit" in matrix["calculate_routes"]["missing_aspects"]
+
+
 def test_a_source_needing_credentials_contributes_no_capabilities_until_configured():
     """高德 is implemented but inert without a key, so it must not appear as coverage.
 
@@ -115,7 +242,7 @@ def test_a_source_needing_credentials_contributes_no_capabilities_until_configur
     assert amap.credentials, "it must declare the credential that activates it"
 
     # The factory really does build it, so the name is not decorative.
-    assert "amap" in _credentialed_stack_names()
+    assert set(amap.provider_names) <= _credentialed_stack_names()
 
     # But with only the keyless stack registered it is not coverage.
     matrix = capability_matrix(registered_names=_free_stack_names())

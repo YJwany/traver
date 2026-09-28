@@ -21,9 +21,34 @@ from travel_api.domain.models import (
 
 @runtime_checkable
 class HotelProvider(Protocol):
+    """Finds hotels. Says nothing about whether it can price them.
+
+    Finding a hotel and quoting a room rate are two different abilities from two
+    different kinds of source, so they are two protocols. They used to be one, which
+    made the second method a condition of having the first: a source that could list
+    hotels but had no rates — 高德 returns hotel POIs and no prices — failed the
+    ``isinstance`` check and was therefore never routed *at all*, silently
+    contributing no hotels while its manifest advertised ``search_hotels``.
+
+    Split deliberately, so a source is judged on the methods it actually implements.
+    """
+
     name: str
 
     async def search_hotels(self, profile: TripProfile) -> ProviderResult: ...
+
+
+@runtime_checkable
+class RoomOfferProvider(Protocol):
+    """Quotes room rates for hotels it did not necessarily discover.
+
+    Separate from ``HotelProvider`` for the same reason: rates are a commercial
+    capability that most sources lack, and lacking them must not disable hotel
+    search. A source that has no rates is not broken — it is simply not asked for
+    prices, and the budget layer marks those costs as estimates.
+    """
+
+    name: str
 
     async def search_room_offers(
         self, hotel_ids: list[str], profile: TripProfile
@@ -97,9 +122,14 @@ class HealthProvider(Protocol):
 
 
 # Method name -> the capability a provider must expose to receive that call.
+#
+# Each entry names the *minimum* a provider must implement to be routed that method.
+# Note ``search_hotels`` and ``search_room_offers`` map to different protocols: a
+# source that lists hotels without quoting rates must still receive hotel calls, and
+# requiring both would disqualify it from either.
 CAPABILITY_BY_METHOD: dict[str, type] = {
     "search_hotels": HotelProvider,
-    "search_room_offers": HotelProvider,
+    "search_room_offers": RoomOfferProvider,
     "search_restaurants": FoodProvider,
     "search_attractions": AttractionProvider,
     "calculate_routes": RouteProvider,
@@ -111,6 +141,7 @@ CAPABILITY_BY_METHOD: dict[str, type] = {
 
 class TravelProvider(
     HotelProvider,
+    RoomOfferProvider,
     FoodProvider,
     AttractionProvider,
     RouteProvider,

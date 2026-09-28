@@ -18,6 +18,7 @@ from travel_api.domain.models import (
 )
 from travel_api.providers.free import attributions_as_dicts
 from travel_api.providers.manifest import (
+    CAPABILITY_ORDER,
     capability_matrix,
     catalog_as_dicts,
     manifest_for,
@@ -154,16 +155,25 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
     settings = request.app.state.settings
     registry = request.app.state.provider_registry.for_owner(principal.owner_id)
     registered = [getattr(provider, "name", "") for provider in registry.all()]
+    # Which *live* providers implement each capability, asked of the registry rather
+    # than inferred from names. Without this, a source is credited with everything it
+    # declares as soon as any one of its providers is registered — which is how a
+    # source whose routing provider failed to register could still be reported as
+    # covering 公交/地铁.
+    live_providers = {
+        provider: {getattr(item, "name", "") for item in registry.providers_for(provider)}
+        for provider in CAPABILITY_ORDER
+    }
     configured = _credentials_configured(principal.owner_id, request)
 
     catalog = catalog_as_dicts(registered, configured_credentials=configured)
-    matrix = capability_matrix(registered)
+    matrix = capability_matrix(registered, live_providers)
     return {
         "providers": catalog,
         "capabilities": matrix,
         "registered": sorted(name for name in registered if name),
         "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
-        "uncovered_aspects": uncovered_aspects(registered),
+        "uncovered_aspects": uncovered_aspects(registered, live_providers),
         "vault": _vault_status(request, settings),
     }
 

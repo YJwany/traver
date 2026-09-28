@@ -21,7 +21,11 @@ import pytest
 from fastapi.testclient import TestClient
 from travel_api.config import Settings
 from travel_api.main import create_app
-from travel_api.providers.amap import AMAP_KEY_CREDENTIAL, AMAP_PROVIDER_ID
+from travel_api.providers.amap import (
+    AMAP_KEY_CREDENTIAL,
+    AMAP_PROVIDER_ID,
+    AMAP_PROVIDER_NAMES,
+)
 
 SECRET_KEY = "amap-web-service-key-must-never-be-echoed"
 
@@ -85,6 +89,17 @@ def _field(catalog: dict, provider_id: str, credential_key: str) -> dict:
     )
 
 
+def _is_registered(catalog: dict) -> bool:
+    """Whether 高德's providers are actually live in this owner's registry.
+
+    Checked against the per-provider names, not the ``"amap"`` source id: the
+    registry keys providers by name, so all three being present is the thing that
+    matters. Asserting only the source id is what let a bug through in which two of
+    the three providers were silently dropped while the catalogue still looked right.
+    """
+    return set(AMAP_PROVIDER_NAMES) <= set(catalog["registered"])
+
+
 # -- with no key: the gap must be visible ---------------------------------
 
 
@@ -97,7 +112,7 @@ def test_without_a_key_transit_is_reported_as_an_uncovered_aspect(client, owners
     """
     catalog = _catalog(client, owners["a"])
 
-    assert "amap" not in catalog["registered"]
+    assert not _is_registered(catalog)
     routing = _row(catalog, "calculate_routes")
     # The capability is uncovered outright here, because nothing at all is registered.
     assert routing["covered"] is False
@@ -126,7 +141,7 @@ def test_saving_a_key_activates_amap_for_that_owner(client, owners):
     built with, which is the "I saved my key and it still doesn't work" bug.
     """
     before = _catalog(client, owners["a"])
-    assert "amap" not in before["registered"]
+    assert not _is_registered(before)
 
     stored = client.put(
         f"/api/v1/settings/credentials/{AMAP_PROVIDER_ID}/{AMAP_KEY_CREDENTIAL}",
@@ -137,7 +152,7 @@ def test_saving_a_key_activates_amap_for_that_owner(client, owners):
     assert SECRET_KEY not in stored.text
 
     after = _catalog(client, owners["a"])
-    assert "amap" in after["registered"], "the key must activate the source on the next request"
+    assert _is_registered(after), "the key must activate the source on the next request"
     routing = _row(after, "calculate_routes")
     assert routing["covered"] is True
     assert "amap" in routing["providers"]
@@ -190,15 +205,15 @@ def test_one_owners_key_does_not_become_anothers_capability(client, owners):
     catalog_a = _catalog(client, owners["a"])
     catalog_b = _catalog(client, owners["b"])
 
-    assert "amap" in catalog_a["registered"]
-    assert "amap" not in catalog_b["registered"], (
+    assert _is_registered(catalog_a)
+    assert not _is_registered(catalog_b), (
         "owner-b has supplied nothing and must not inherit owner-a's source"
     )
     assert _row(catalog_b, "calculate_routes")["covered"] is False
 
     # And the ordering must not matter: re-read owner-b first, then owner-a.
-    assert "amap" not in _catalog(client, owners["b"])["registered"]
-    assert "amap" in _catalog(client, owners["a"])["registered"]
+    assert not _is_registered(_catalog(client, owners["b"]))
+    assert _is_registered(_catalog(client, owners["a"]))
 
 
 def test_removing_the_key_withdraws_the_capability_again(client, owners):
@@ -206,13 +221,13 @@ def test_removing_the_key_withdraws_the_capability_again(client, owners):
     catalogue would keep advertising a capability the owner can no longer exercise."""
     path = f"/api/v1/settings/credentials/{AMAP_PROVIDER_ID}/{AMAP_KEY_CREDENTIAL}"
     client.put(path, json={"value": SECRET_KEY}, headers=_auth(owners["a"]))
-    assert "amap" in _catalog(client, owners["a"])["registered"]
+    assert _is_registered(_catalog(client, owners["a"]))
 
     removed = client.delete(path, headers=_auth(owners["a"]))
     assert removed.status_code == 200
 
     after = _catalog(client, owners["a"])
-    assert "amap" not in after["registered"]
+    assert not _is_registered(after)
     assert _row(after, "calculate_routes")["covered"] is False
 
 
@@ -300,7 +315,7 @@ def test_disable_amap_is_respected(tmp_path):
         )
         catalog = _catalog(local, key)
 
-    assert "amap" not in catalog["registered"], (
+    assert not _is_registered(catalog), (
         "AMAP_ENABLED=false must prevent the provider being built even with a stored key"
     )
     assert _row(catalog, "calculate_routes")["covered"] is False
