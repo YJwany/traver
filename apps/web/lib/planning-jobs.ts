@@ -74,6 +74,12 @@ export type PlanningJob = {
  * or a stage is removed, this list stops matching and the fallback below shows the raw name
  * rather than nothing. A progress display that silently omits an unknown step would hide
  * exactly the change someone needs to know about.
+ *
+ * That fallback is a safety net, not a licence to forget: an entry missing here renders as
+ * `resolve_places` in the middle of a Chinese progress line, and the user cannot tell that
+ * from a deliberate technical label. `test_web_api_contract.py` now reads the names the
+ * server actually emits out of its own source and fails when this table does not cover them,
+ * which is how `resolve_places` was caught.
  */
 export const STEP_LABELS: Record<string, string> = {
   resolve_sources: "装配可用数据源",
@@ -81,6 +87,7 @@ export const STEP_LABELS: Record<string, string> = {
   collect_places: "采集酒店、餐厅、景点、天气",
   room_offers: "查询房型与报价",
   enrich_attractions: "补充景点简介",
+  resolve_places: "定位笔记里提到的地点",
   calculate_routes: "计算路线耗时",
   build_itinerary: "生成每日行程与预算",
   collect_health: "检查数据源状态",

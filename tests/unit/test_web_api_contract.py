@@ -220,6 +220,136 @@ def test_a_trip_that_never_mentions_a_mode_stores_none(client):
 
 
 INGESTIONS_LIB = Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "ingestions.ts"
+PLANNING_JOBS_LIB = (
+    Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "planning-jobs.ts"
+)
+INGESTED_PLACES_LIB = (
+    Path(__file__).resolve().parents[2] / "apps" / "web" / "lib" / "ingested-places.ts"
+)
+
+
+def _ts_union_members(source: str, type_name: str, *, path: Path) -> set[str]:
+    """The string literals of a TypeScript union type, e.g. ``"a" | "b"``.
+
+    Shared by the three union checks below, because each of them must read the union the same
+    way — a scan that worked for one and silently returned nothing for another would pass.
+    """
+    match = re.search(rf"export type {type_name}\s*=(.*?);", source, re.DOTALL)
+    assert match, f"could not find `{type_name}` in {path.name}"
+    members = set(re.findall(r'"([a-z_]+)"', match.group(1)))
+    assert members, f"`{type_name}` parsed to nothing, so the check would be vacuous"
+    return members
+
+
+def test_the_web_knows_every_place_resolution_status_the_server_can_report():
+    """``PlaceResolutionStatus`` in the web against ``PlaceResolutionStatus`` in the API.
+
+    The same shape as the two checks around it, and the one with the most at stake: the four
+    statuses are kept apart precisely so that "nobody was asked" is not presented as "asked and
+    not found". A status the server can report and the web cannot name falls into the
+    ``default:`` branch, which says 未知的定位结果 — honest, and useless to the reader who is
+    trying to find out whether their note was ignored.
+    """
+    from travel_api.domain.models import PlaceResolutionStatus
+
+    source = INGESTED_PLACES_LIB.read_text(encoding="utf-8")
+    declared = _ts_union_members(source, "PlaceResolutionStatus", path=INGESTED_PLACES_LIB)
+    expected = {member.value for member in PlaceResolutionStatus}
+
+    assert declared == expected, (
+        "the web and the API disagree about place resolution statuses. "
+        f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
+    )
+
+
+def test_the_web_knows_every_job_status_the_server_can_report():
+    """A status the web does not know is not merely unlabelled — it is treated as non-terminal.
+
+    ``isTerminal`` returns false for anything outside its three end states, and the client polls
+    until a job is terminal. So a status added to the server appears on the web as a job that
+    runs forever: the progress line says 进行中 while the work finished some time ago, and the
+    poll never stops. Silence, rather than a visible gap.
+    """
+    from travel_api.services.planning_jobs import JobStatus
+
+    source = PLANNING_JOBS_LIB.read_text(encoding="utf-8")
+    declared = _ts_union_members(source, "JobStatus", path=PLANNING_JOBS_LIB)
+    expected = {member.value for member in JobStatus}
+
+    assert declared == expected, (
+        "the web and the API disagree about job statuses. "
+        f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
+    )
+
+
+def test_the_web_knows_every_job_kind_the_server_can_report():
+    """``kind`` decides what the client says is happening, so a third kind must not be silent.
+
+    The web branches on ``kind`` to tell "a new trip is being planned" from "the trip on screen
+    is being replaced". A kind it does not know falls to whichever branch is the ``else``, which
+    would describe a refresh as a new trip.
+    """
+    from travel_api.services.planning_jobs import JobKind
+
+    source = PLANNING_JOBS_LIB.read_text(encoding="utf-8")
+    declared = _ts_union_members(source, "JobKind", path=PLANNING_JOBS_LIB)
+    expected = {member.value for member in JobKind}
+
+    assert declared == expected, (
+        "the web and the API disagree about job kinds. "
+        f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
+    )
+
+
+def test_every_place_resolution_status_has_its_own_sentence():
+    """Handling a status is not enough — the four must not say the same thing.
+
+    A status with no ``case`` falls through to ``default:``, which reports 未知的定位结果. That
+    is at least visibly odd. The quieter failure is a status that *has* a case whose body is a
+    copy of another's: ``not_attempted`` returning the ``not_found`` sentence passes any check
+    that only counts cases, and it re-collapses "nobody was asked" into "asked and found
+    nothing" — the exact distinction the four-way split exists to preserve, and the one this
+    file's sibling test on the backend asserts in prose.
+
+    So the bodies are compared for uniqueness, not just for presence. This was written after a
+    mutation that duplicated ``not_found``'s body into ``not_attempted`` passed the presence-only
+    version of this test.
+    """
+    source = INGESTED_PLACES_LIB.read_text(encoding="utf-8")
+    body = source.split("export function resolvedPlaceWording", 1)[1]
+
+    # Split the switch into (status, body) pairs. Anchored on `case "..."` and running to the
+    # next `case`/`default`, which is enough for this function's shape.
+    cases = re.findall(
+        r'case "([a-z_]+)":(.*?)(?=\n\s*case "|\n\s*default:)',
+        body,
+        re.DOTALL,
+    )
+    assert cases, "no cases parsed, so this check would be vacuous"
+
+    from travel_api.domain.models import PlaceResolutionStatus
+
+    expected = {member.value for member in PlaceResolutionStatus}
+    handled = {name for name, _ in cases}
+    assert handled == expected, (
+        f"unhandled statuses fall through to a generic sentence: {sorted(expected - handled)}"
+    )
+
+    # Normalise whitespace so a copy that was reindented still counts as a copy.
+    normalised = {name: " ".join(text.split()) for name, text in cases}
+    seen: dict[str, str] = {}
+    duplicates = []
+    for name in sorted(normalised):
+        text = normalised[name]
+        if text in seen:
+            duplicates.append((name, seen[text]))
+        else:
+            seen[text] = name
+
+    assert not duplicates, (
+        "these statuses render the identical sentence, so the outcome they distinguish is lost: "
+        + "; ".join(f"{a} == {b}" for a, b in duplicates)
+    )
 
 
 def test_the_web_knows_exactly_the_fact_kinds_the_server_can_produce():
@@ -248,6 +378,70 @@ def test_the_web_knows_exactly_the_fact_kinds_the_server_can_produce():
         "the web and the API disagree about fact kinds. "
         f"web only: {sorted(declared - expected)}; api only: {sorted(expected - declared)}"
     )
+
+
+def test_the_web_knows_every_planning_step_the_server_can_emit():
+    """``STEP_LABELS`` against the step names actually emitted, read from the server's source.
+
+    This one was found by looking rather than by a failure report: the ``resolve_places`` step
+    was added to ``aggregation.py`` in the same change that added the feature behind it, and the
+    web's label table was not updated. Nothing broke. The progress line rendered a raw
+    ``resolve_places`` between two Chinese labels, which a reader has no way to distinguish from
+    a deliberate technical term — and ``planning-jobs.ts`` has a fallback that *intends* to show
+    unknown names, so the omission looked like the fallback working.
+
+    The step names are not an enum; they are string literals passed to ``reporter.step``, so the
+    server's own sources are scanned for them. That is crude, and it is the only thing that can
+    see a literal nobody registered anywhere. A new ``.step("...")`` call is covered the moment
+    it is written, which is the property that was missing.
+    """
+    source_root = Path(__file__).resolve().parents[2] / "apps" / "api" / "src" / "travel_api"
+    emitted: set[str] = set()
+    # Both call shapes, because the two exist for a reason (one is inside a service that may
+    # have no reporter, the other is a direct call) and a scan that knew only one would report
+    # a false clean bill of health.
+    patterns = (
+        re.compile(r'\.step\(\s*\n?\s*"([a-z_]+)"'),
+        re.compile(r'_maybe_step\(\s*progress,\s*"([a-z_]+)"'),
+    )
+    for path in sorted(source_root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for pattern in patterns:
+            emitted.update(pattern.findall(text))
+
+    assert len(emitted) >= 8, f"the scan found only {len(emitted)} step names: {sorted(emitted)}"
+    assert "resolve_places" in emitted, "the scan must see the step this test was written for"
+
+    web = PLANNING_JOBS_LIB.read_text(encoding="utf-8")
+    match = re.search(r"export const STEP_LABELS[^{]*\{(.*?)\n\};", web, re.DOTALL)
+    assert match, f"could not find `STEP_LABELS` in {PLANNING_JOBS_LIB.name}"
+    labelled = set(re.findall(r"^\s*([a-z_]+):", match.group(1), re.MULTILINE))
+    assert labelled, "an empty table means the scan is wrong and this check is vacuous"
+
+    assert labelled == emitted, (
+        "the web's step labels and the steps the server emits disagree. "
+        f"unlabelled (would render as a raw identifier): {sorted(emitted - labelled)}; "
+        f"stale (labelled but never emitted): {sorted(labelled - emitted)}"
+    )
+
+
+def test_every_step_label_is_chinese_prose_rather_than_the_identifier():
+    """The label must say something a user can read, not echo the key.
+
+    ``stepLabel`` falls back to the raw name, so a label that *is* the name is
+    indistinguishable from the fallback — the entry would look present and do nothing.
+    """
+    web = PLANNING_JOBS_LIB.read_text(encoding="utf-8")
+    match = re.search(r"export const STEP_LABELS[^{]*\{(.*?)\n\};", web, re.DOTALL)
+    assert match
+    pairs = re.findall(r'^\s*([a-z_]+):\s*"([^"]*)"', match.group(1), re.MULTILINE)
+    assert pairs, "no label pairs parsed"
+
+    for name, label in pairs:
+        assert label != name, f"{name} is labelled with its own identifier"
+        assert any("\u4e00" <= character <= "\u9fff" for character in label), (
+            f"{name} has no Chinese in its label ({label!r}), so it reads as an identifier"
+        )
 
 
 def test_the_resolver_agrees_with_what_the_api_stored(client):
