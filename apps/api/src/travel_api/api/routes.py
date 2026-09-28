@@ -7,6 +7,7 @@ from travel_api.domain.models import (
     AIChatRequest,
     AIChatResult,
     ConversationMessage,
+    CredentialWriteRequest,
     ProviderHealth,
     Trip,
     TripPatchRequest,
@@ -16,8 +17,15 @@ from travel_api.domain.models import (
     TripRevisionResult,
 )
 from travel_api.providers.free import attributions_as_dicts
-from travel_api.providers.manifest import capability_matrix, catalog_as_dicts
+from travel_api.providers.manifest import capability_matrix, catalog_as_dicts, manifest_for
 from travel_api.services.auth import Principal
+from travel_api.services.credentials import (
+    SOURCE_ENV,
+    SOURCE_STORED,
+    CredentialVaultError,
+    VaultLockedError,
+    configured_credentials,
+)
 from travel_api.services.trip_service import (
     ConcurrentTripUpdateError,
     TripNotFoundError,
@@ -69,6 +77,12 @@ async def health(request: Request) -> dict:
     auth_service = getattr(request.app.state, "auth_service", None)
     auth_enabled = bool(auth_service is not None and auth_service.enabled)
 
+    # Reported because an operator who thinks credentials are encrypted when the
+    # vault is actually locked would be relying on a protection that is not in
+    # effect. This is a fact about the deployment, not a secret.
+    credential_vault = getattr(request.app.state, "credential_vault", None)
+    vault_enabled = bool(credential_vault is not None and credential_vault.enabled)
+
     payload = {
         "status": "ok" if database_ok else "degraded",
         "ready": database_ok,
@@ -77,6 +91,8 @@ async def health(request: Request) -> dict:
         "persistence": "sqlalchemy",
         "database": "ok" if database_ok else "unavailable",
         "authentication": "api-key" if auth_enabled else "disabled",
+        "credential_vault": "ready" if vault_enabled else "locked",
+        "credential_key_source": getattr(request.app.state, "credential_key_source", "unknown"),
     }
     if not database_ok:
         payload["database_error"] = database_error
@@ -98,28 +114,18 @@ async def provider_attributions() -> list[dict[str, str]]:
     return attributions_as_dicts()
 
 
-def _credentials_configured_from_settings(settings) -> dict[str, set[str]]:
-    """Which credential keys already have a value, from the environment.
+def _credentials_configured(owner_id: str, request: Request) -> dict[str, set[str]]:
+    """Credential names in effect for this owner, from the vault and the environment.
 
-    Values are never returned, only the fact that one exists, so this endpoint
-    stays safe to render. Once the credential store exists this becomes a union
-    of environment and stored values; today the environment is the only source.
+    Delegates to the credential layer so the catalogue and the settings form share
+    one definition; a second implementation here is how the two screens end up
+    disagreeing about what is configured.
     """
-    configured: dict[str, set[str]] = {}
-    ai_keys: set[str] = set()
-    if settings.ai_base_url:
-        ai_keys.add("ai_base_url")
-    if settings.ai_model:
-        ai_keys.add("ai_model")
-    if settings.ai_api_key:
-        ai_keys.add("ai_api_key")
-    if ai_keys:
-        configured["openai-compatible"] = ai_keys
-    return configured
+    return configured_credentials(request.app.state.credential_resolver, owner_id)
 
 
 @router.get("/providers/catalog", dependencies=[Depends(require_read)])
-async def provider_catalog(request: Request) -> dict:
+async def provider_catalog(request: Request, principal: Principal = Depends(get_principal)) -> dict:
     """What this deployment can do now, and what would unlock more.
 
     Traver ships no data and binds to no model, so "which sources are plugged in"
@@ -133,7 +139,7 @@ async def provider_catalog(request: Request) -> dict:
     settings = request.app.state.settings
     registry = request.app.state.provider_registry
     registered = [getattr(provider, "name", "") for provider in registry.all()]
-    configured = _credentials_configured_from_settings(settings)
+    configured = _credentials_configured(principal.owner_id, request)
 
     catalog = catalog_as_dicts(registered, configured_credentials=configured)
     matrix = capability_matrix(registered)
@@ -142,6 +148,132 @@ async def provider_catalog(request: Request) -> dict:
         "capabilities": matrix,
         "registered": sorted(name for name in registered if name),
         "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
+        "vault": _vault_status(request, settings),
+    }
+
+
+def _vault_status(request: Request, settings) -> dict:
+    """How stored credentials are protected, and whether that is currently working.
+
+    Reported rather than assumed: "your keys are encrypted" is only worth saying
+    if the vault actually opened, and which key source is in use changes what the
+    encryption does and does not defend against.
+    """
+    vault = request.app.state.credential_vault
+    return {
+        "enabled": bool(vault.enabled),
+        "locked_reason": request.app.state.credential_key_error,
+        "key_source": request.app.state.credential_key_source,
+        "key_file": settings.credential_key_file,
+        # On Windows os.chmod cannot set an ACL, so the key file is not actually
+        # owner-only. Saying so is better than implying POSIX-grade protection.
+        "owner_only_permissions": request.app.state.credential_permissions_restricted,
+    }
+
+
+@router.get("/settings/credentials", dependencies=[Depends(require_read)])
+async def list_credentials(request: Request, principal: Principal = Depends(get_principal)) -> dict:
+    """Which credentials are set for the caller, and where each came from.
+
+    Names and origins only. A value is never returned by any route: the vault can
+    be written to and cleared, but not read back out through HTTP.
+    """
+    stored = request.app.state.credential_vault.configured_by_provider(principal.owner_id)
+
+    entries: dict[str, dict[str, str]] = {}
+    for provider_id, keys in _credentials_configured(principal.owner_id, request).items():
+        for key in keys:
+            origin = SOURCE_STORED if key in stored.get(provider_id, set()) else SOURCE_ENV
+            entries.setdefault(provider_id, {})[key] = origin
+    return {
+        "vault": _vault_status(request, request.app.state.settings),
+        "credentials": entries,
+    }
+
+
+def _require_declared_credential(provider_id: str, credential_key: str):
+    """Reject a provider/credential pair no manifest declares.
+
+    Two reasons, both practical: a typo would otherwise write a record nothing
+    ever reads, which looks exactly like "it saved but nothing changed"; and
+    without this the vault becomes general-purpose key-value storage for whoever
+    holds a write key.
+    """
+    manifest = manifest_for(provider_id)
+    if manifest is None:
+        raise HTTPException(status_code=404, detail=f"unknown provider: {provider_id}")
+    declared = {item.key for item in manifest.credentials}
+    if credential_key not in declared:
+        raise HTTPException(
+            status_code=404,
+            detail=f"provider {provider_id} does not declare credential {credential_key}",
+        )
+    return manifest
+
+
+@router.put("/settings/credentials/{provider_id}/{credential_key}")
+async def set_credential(
+    provider_id: str,
+    credential_key: str,
+    payload: CredentialWriteRequest,
+    request: Request,
+    principal: Principal = Depends(require_write),
+) -> dict:
+    """Store one of the caller's own credentials, encrypted at rest.
+
+    Scoped to the caller: the record is keyed by their owner id, so one user
+    saving a key cannot affect anyone else's requests.
+    """
+    manifest = _require_declared_credential(provider_id, credential_key)
+    vault = request.app.state.credential_vault
+    try:
+        vault.store(principal.owner_id, provider_id, credential_key, payload.value)
+    except VaultLockedError as exc:
+        # 503, not 500: the deployment is fine, this capability is switched off or
+        # has no usable master key, and the reason is actionable.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except CredentialVaultError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "provider_id": provider_id,
+        "credential_key": credential_key,
+        # Deliberately echoes only a masked acknowledgement, never the value.
+        "stored": True,
+        "secret": next(item.secret for item in manifest.credentials if item.key == credential_key),
+    }
+
+
+@router.delete("/settings/credentials/{provider_id}/{credential_key}")
+async def delete_credential(
+    provider_id: str,
+    credential_key: str,
+    request: Request,
+    principal: Principal = Depends(require_write),
+) -> dict:
+    """Remove one stored credential, falling back to the environment default."""
+    _require_declared_credential(provider_id, credential_key)
+    removed = request.app.state.credential_vault.remove(
+        principal.owner_id, provider_id, credential_key
+    )
+    return {"provider_id": provider_id, "credential_key": credential_key, "removed": removed}
+
+
+@router.post("/settings/model/test", dependencies=[Depends(require_write)])
+async def test_model(request: Request, principal: Principal = Depends(get_principal)) -> dict:
+    """Call the caller's configured model once and report what happened.
+
+    A real request, not a shape check on the key: the point is to tell the user
+    whether their model actually answers, and a test that only inspected the
+    credential would pass for a revoked key.
+    """
+    probe = await request.app.state.model_runtime.probe(principal.owner_id)
+    return {
+        "ok": probe.ok,
+        "model": probe.model,
+        "latency_ms": probe.latency_ms,
+        "reply": probe.reply,
+        "error": probe.error,
     }
 
 

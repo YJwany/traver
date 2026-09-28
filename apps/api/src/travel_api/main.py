@@ -24,7 +24,15 @@ from travel_api.providers.registry import ProviderRegistry
 from travel_api.providers.resilience import ProviderCallPolicy, ProviderRuntime
 from travel_api.services.auth import KEY_PREFIX, AuthenticationError, AuthService, hash_api_key
 from travel_api.services.budget_engine import BudgetEngine
+from travel_api.services.credentials import (
+    CredentialCipher,
+    CredentialResolver,
+    CredentialVault,
+    CredentialVaultError,
+    load_master_key,
+)
 from travel_api.services.freshness import FreshnessPolicy, FreshnessService
+from travel_api.services.model_runtime import ModelRuntime
 from travel_api.services.tool_registry import build_default_tool_registry
 from travel_api.services.travel_ai import TravelAIService
 from travel_api.services.trip_service import TripService
@@ -200,11 +208,63 @@ def create_app(
             window_seconds=app_settings.rate_limit_window_seconds,
         )
 
+        # Credential vault. Built before the model runtime because the model is
+        # resolved from it. An unusable master key must not take the service down:
+        # with no model the local planner still produces a complete plan, so a
+        # lock failure degrades, and the reason is reported by /health and the
+        # settings page rather than hidden in a log.
+        credential_cipher = None
+        credential_key_source = "unavailable"
+        credential_key_error: str | None = None
+        credential_permissions_restricted = True
+        if app_settings.credential_vault_enabled:
+            try:
+                master_key = load_master_key(
+                    env_value=app_settings.credential_encryption_key,
+                    key_file=Path(app_settings.credential_key_file),
+                )
+                credential_cipher = CredentialCipher(master_key.key)
+                credential_key_source = master_key.source
+                credential_permissions_restricted = master_key.permissions_restricted
+            except CredentialVaultError as exc:
+                credential_key_error = f"{type(exc).__name__}: {exc}"
+                logger.error("credential vault is locked: %s", credential_key_error)
+        else:
+            credential_key_error = "disabled by configuration"
+
+        credential_vault = CredentialVault(
+            lambda: UnitOfWork(database.session_factory),
+            credential_cipher,
+            enabled=credential_cipher is not None,
+            locked_reason=credential_key_error,
+        )
+        credential_resolver = CredentialResolver(credential_vault, app_settings)
+        model_runtime = ModelRuntime(
+            credential_resolver,
+            default_base_url=app_settings.ai_base_url,
+            default_model=app_settings.ai_model,
+            default_timeout_seconds=app_settings.ai_timeout_seconds,
+            default_max_tokens=app_settings.ai_max_tokens,
+        )
+        app.state.credential_vault = credential_vault
+        app.state.credential_resolver = credential_resolver
+        app.state.model_runtime = model_runtime
+        app.state.credential_key_source = credential_key_source
+        app.state.credential_key_error = credential_key_error
+        app.state.credential_permissions_restricted = credential_permissions_restricted
+
+        # This adapter is now only the environment-supplied default. The effective
+        # model is resolved per request through ``adapter_factory``, so a key
+        # saved in the settings page takes effect on the next message without a
+        # restart, and two owners can use different models in one deployment.
+        #
+        # Gated on the base URL alone: a keyless local server (Ollama, LM Studio)
+        # is a valid, common choice, and requiring a key made it unreachable.
         adapter = None
-        if app_settings.ai_base_url and app_settings.ai_api_key:
+        if app_settings.ai_base_url:
             adapter = OpenAICompatibleAdapter(
                 base_url=app_settings.ai_base_url,
-                api_key=app_settings.ai_api_key,
+                api_key=app_settings.ai_api_key or "",
                 model=app_settings.ai_model,
                 timeout_seconds=app_settings.ai_timeout_seconds,
                 # Named ``max_tokens`` on the adapter. This used to say
@@ -220,6 +280,7 @@ def create_app(
             tool_registry=app.state.tool_registry,
             uow_factory=lambda: UnitOfWork(database.session_factory),
             adapter=adapter,
+            adapter_factory=model_runtime.adapter_for,
             max_tool_calls=app_settings.ai_max_tool_calls,
             max_same_tool_calls=app_settings.ai_max_same_tool_calls,
             recent_message_limit=app_settings.conversation_recent_messages,

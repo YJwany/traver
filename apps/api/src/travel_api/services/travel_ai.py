@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any
@@ -47,6 +48,7 @@ class TravelAIService:
         tool_registry: ToolRegistry,
         uow_factory,
         adapter: AIProvider | None = None,
+        adapter_factory: Callable[[str | None], AIProvider | None] | None = None,
         max_tool_calls: int = 20,
         max_same_tool_calls: int = 5,
         recent_message_limit: int = 12,
@@ -55,14 +57,36 @@ class TravelAIService:
         self.tool_registry = tool_registry
         self.uow_factory = uow_factory
         self.adapter = adapter
+        #: Resolves the model per request, because with per-owner credentials the
+        #: model belongs to the caller rather than to the process. ``adapter``
+        #: remains the fallback for tests and single-model deployments.
+        self.adapter_factory = adapter_factory
         self.requirements = RequirementAgent(adapter=adapter)
         self.context_builder = ConversationContextBuilder(recent_message_limit)
         self.orchestrator = ToolOrchestrator(
             tool_registry, max_tool_calls=max_tool_calls, max_same_tool_calls=max_same_tool_calls
         )
 
+    def _resolve_adapter(self, owner_id: str | None) -> tuple[AIProvider | None, str | None]:
+        """The model for this caller, plus a warning when one is broken.
+
+        "No model configured" returns ``(None, None)`` and is not a warning: the
+        local deterministic planner takes over and the trip is still planned.
+        A *configured but unusable* model returns a warning that reaches the user,
+        because the alternative — silently planning without the model they set up,
+        or worse, borrowing the operator's key — hides a real problem.
+        """
+        if self.adapter_factory is None:
+            return self.adapter, None
+        try:
+            return self.adapter_factory(owner_id), None
+        except Exception as exc:  # noqa: BLE001 - surfaced as a warning, not a crash
+            logger.warning("model resolution failed; using local planner", exc_info=True)
+            return None, f"AI model unavailable; local planner used: {exc}"
+
     async def chat(self, request: AIChatRequest, *, owner_id: str | None = None) -> AIChatResult:
         started = perf_counter()
+        adapter, adapter_warning = self._resolve_adapter(owner_id)
         original_trip = self._load_trip(request.trip_id, owner_id=owner_id)
         # A caller who named a specific trip must get an error if it is not
         # theirs. Treating that as "no trip" used to fall through to creating a
@@ -70,7 +94,7 @@ class TravelAIService:
         # itinerary instead of a 404. Only an absent trip_id means "start fresh".
         if request.trip_id is not None and original_trip is None:
             raise TripNotFoundError(str(request.trip_id))
-        requirement = await self.requirements.understand(request.message)
+        requirement = await self.requirements.understand(request.message, adapter=adapter)
         conversation_id = self._get_conversation_id(request.trip_id)
         previous_messages = self._load_messages(conversation_id)
 
@@ -96,8 +120,19 @@ class TravelAIService:
         context = self.context_builder.build(trip, previous_messages)
         explicit_write = self._has_explicit_write_intent(request.message)
         orchestration = await self._execute(
-            trip, requirement, request.message, context, explicit_write, original_trip is None
+            trip,
+            requirement,
+            request.message,
+            context,
+            explicit_write,
+            original_trip is None,
+            adapter=adapter,
         )
+        if adapter_warning:
+            # Recorded on the result rather than only in the log, so a user whose
+            # saved key cannot be read finds out from the response instead of
+            # wondering why their model is not being used.
+            orchestration.warnings.append(adapter_warning)
         latest_trip = self.trip_service.get(trip.id, owner_id=owner_id)
         changed = latest_trip.current_version != trip.current_version
         result = self._build_result(
@@ -130,11 +165,13 @@ class TravelAIService:
         context: dict[str, Any],
         explicit_write: bool,
         initial_plan: bool,
+        adapter: AIProvider | None = None,
     ) -> ToolOrchestrationResult:
-        if self.adapter is not None:
+        effective_adapter = adapter if adapter is not None else self.adapter
+        if effective_adapter is not None:
             try:
                 model_result = await self.orchestrator.run_model(
-                    self.adapter,
+                    effective_adapter,
                     AIRequest(
                         system_instruction=POLICY,
                         user_input=message,

@@ -14,6 +14,7 @@ from travel_api.db.models import (
     ApiKeyRecord,
     AttractionRecord,
     ConversationMessageRecord,
+    CredentialRecord,
     DecisionScoreRecord,
     HotelOfferRecord,
     HotelOfferSnapshotRecord,
@@ -736,3 +737,88 @@ class ApiKeyRepository:
         record.revoked_at = when or utc_now()
         self.session.flush()
         return True
+
+
+class CredentialRepository:
+    """Storage for sealed third-party credentials.
+
+    Every method that returns a record takes ``owner_id`` and filters on it, so
+    there is no way to read across tenants by accident. The ciphertext is stored
+    and returned opaquely here — encryption and decryption live in
+    ``services/credentials.py`` so this layer never handles plaintext or a key.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        *,
+        owner_id: str,
+        provider_id: str,
+        credential_key: str,
+        ciphertext: bytes,
+        key_version: int = 1,
+        when: datetime | None = None,
+    ) -> CredentialRecord:
+        """Insert or replace one credential.
+
+        Upsert rather than insert-only because re-saving a key is the normal
+        correction path when a user pastes a wrong one; the unique constraint
+        turns that into an update instead of a duplicate row.
+        """
+        now = when or utc_now()
+        record = self.get(owner_id, provider_id, credential_key)
+        if record is None:
+            record = CredentialRecord(
+                owner_id=owner_id,
+                provider_id=provider_id,
+                credential_key=credential_key,
+                ciphertext=ciphertext,
+                key_version=key_version,
+                created_at=now,
+                updated_at=now,
+            )
+            self.session.add(record)
+        else:
+            record.ciphertext = ciphertext
+            record.key_version = key_version
+            record.updated_at = now
+        self.session.flush()
+        return record
+
+    def get(self, owner_id: str, provider_id: str, credential_key: str) -> CredentialRecord | None:
+        return self.session.scalars(
+            select(CredentialRecord).where(
+                CredentialRecord.owner_id == owner_id,
+                CredentialRecord.provider_id == provider_id,
+                CredentialRecord.credential_key == credential_key,
+            )
+        ).first()
+
+    def list_for_owner(self, owner_id: str) -> list[CredentialRecord]:
+        return list(
+            self.session.scalars(
+                select(CredentialRecord)
+                .where(CredentialRecord.owner_id == owner_id)
+                .order_by(CredentialRecord.provider_id, CredentialRecord.credential_key)
+            ).all()
+        )
+
+    def delete(self, owner_id: str, provider_id: str, credential_key: str) -> bool:
+        record = self.get(owner_id, provider_id, credential_key)
+        if record is None:
+            return False
+        self.session.delete(record)
+        self.session.flush()
+        return True
+
+    def delete_for_provider(self, owner_id: str, provider_id: str) -> int:
+        result = self.session.execute(
+            delete(CredentialRecord).where(
+                CredentialRecord.owner_id == owner_id,
+                CredentialRecord.provider_id == provider_id,
+            )
+        )
+        self.session.flush()
+        return int(result.rowcount or 0)

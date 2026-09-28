@@ -235,25 +235,31 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             CredentialField(
                 key="ai_base_url",
                 label="接口地址",
-                help="例如 https://api.deepseek.com/v1 或本地 Ollama 的地址",
+                help="例如 https://api.deepseek.com/v1 或本地 Ollama 的 http://127.0.0.1:11434/v1",
                 secret=False,
             ),
             CredentialField(
                 key="ai_model",
                 label="模型名称",
-                help="例如 deepseek-chat、gpt-4o-mini、qwen-plus",
+                help="例如 deepseek-chat、gpt-4o-mini、qwen-plus；留空使用默认 gpt-4o-mini",
                 secret=False,
+                # Not required: Settings.ai_model has a default, so declaring this
+                # mandatory would have the UI report a missing model on a working
+                # setup.
+                required=False,
             ),
             CredentialField(
                 key="ai_api_key",
                 label="API Key",
-                help="不填则停用模型，回落为本地确定性规则规划",
+                help="本地模型（Ollama / LM Studio 等）不需要填写；不填且无接口地址时停用模型，回落为本地确定性规则规划",
                 required=False,
             ),
         ),
-        # Both are needed before the adapter is built; the model name has a
-        # default, so it does not gate activation.
-        activation_keys=("ai_base_url", "ai_api_key"),
+        # Only the base URL gates activation. A keyless local server is a valid
+        # and common choice — Ollama is the usual way to run a model yourself — so
+        # requiring a key here would have reported a working local model as
+        # inactive, and main.py would never have built its adapter.
+        activation_keys=("ai_base_url",),
         cost_note="由所选服务商计费，Traver 不代收",
         freshness_note="不涉及数据时效；只负责理解需求并编排工具调用",
         caveats=(

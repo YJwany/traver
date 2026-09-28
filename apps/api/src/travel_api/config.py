@@ -139,6 +139,24 @@ class Settings(BaseSettings):
     ai_max_same_tool_calls: int = 5
     conversation_recent_messages: int = 12
 
+    # -- Credential vault --------------------------------------------------
+    #: Master key for encrypting stored third-party credentials, as urlsafe
+    #: base64 of 32 bytes (``python -c "from travel_api.services.credentials
+    #: import generate_master_key; print(generate_master_key())"``).
+    #:
+    #: Setting this is the stronger option: the key then lives only in the
+    #: process environment and never touches the database or its backups. When
+    #: it is blank the vault reads ``credential_key_file`` instead and creates it
+    #: on first use, which works out of the box but stores the key next to the
+    #: data it protects. See ``services/credentials.py`` for exactly what each
+    #: mode does and does not defend against.
+    credential_encryption_key: str | None = None
+    #: Where the master key is kept when ``credential_encryption_key`` is unset.
+    credential_key_file: str = ".traver-credential-key"
+    #: A malformed or missing key makes the vault refuse to serve secrets rather
+    #: than silently minting a replacement, which would look like data loss.
+    credential_vault_enabled: bool = True
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     def overpass_mirror_list(self) -> list[str]:

@@ -159,12 +159,12 @@ def test_missing_credentials_are_reported_for_required_fields_only():
     assert entry["missing_credentials"] == []
 
 
-def test_a_model_reports_active_only_when_its_activation_keys_are_present():
+def test_a_model_reports_active_once_its_base_url_is_set():
     """A model has no registry name, so registry presence cannot decide this.
 
-    Reporting a configured model as inactive would be a falsehood in the UI, and
-    the activation condition has to mirror ``main.py``: the adapter is built only
-    when the base URL *and* the key are both set.
+    Gated on the base URL, mirroring ``main.py``: a keyless local server (Ollama,
+    LM Studio) is a valid configuration, so requiring a key would report a working
+    local model as inactive.
     """
 
     def active(configured: set[str]) -> bool:
@@ -175,11 +175,13 @@ def test_a_model_reports_active_only_when_its_activation_keys_are_present():
         entry = next(item for item in catalog if item["id"] == "openai-compatible")
         return entry["active"]
 
-    assert active({"ai_base_url", "ai_api_key"}) is True
+    assert active({"ai_base_url"}) is True
     assert active({"ai_base_url", "ai_api_key", "ai_model"}) is True
-    # Base URL alone is not enough: main.py still leaves the adapter unbuilt.
-    assert active({"ai_base_url"}) is False
+    # A key with nowhere to send it is not a usable model.
+    assert active({"ai_api_key"}) is False
     assert active(set()) is False
+    # The model name has a default and cannot activate a model on its own.
+    assert active({"ai_model"}) is False
 
 
 def test_available_sources_declare_their_freshness():

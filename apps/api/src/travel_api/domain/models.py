@@ -644,3 +644,25 @@ class AIChatResult(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     change: TripChange | None = None
     unresolved_questions: list[str] = Field(default_factory=list)
+
+
+class CredentialWriteRequest(BaseModel):
+    """A credential value to store.
+
+    Write-only on purpose: there is no response model carrying a value back, so a
+    stored secret cannot be read out of the API even by its owner. Showing it again
+    would add an exfiltration path for no benefit — the value can be replaced, and
+    a "test connection" answers whether it works.
+    """
+
+    value: str = Field(min_length=1, max_length=4096)
+
+
+class ModelTestResult(BaseModel):
+    """Outcome of really calling the configured model once."""
+
+    ok: bool
+    model: str = ""
+    latency_ms: float | None = None
+    reply: str | None = None
+    error: str | None = None

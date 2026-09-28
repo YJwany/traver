@@ -31,6 +31,29 @@ Provider 只需声明它**真正能提供**的能力，不需要实现完整接�
 
 `ctrip-mock`、`tongcheng-mock`、`meituan-mock` 与 `FixtureTravelProvider` 使用稳定 fixture 模拟不同来源与价格差异，仅在 `MOCK_PROVIDER_ENABLED=true` 或测试中注册。
 
+## Provider 清单与能力矩阵
+
+Traver 定位是"汇总工具"：它自己不带任何数据，也不绑定任何模型，所有来源都由使用者接入。因此"现在有哪些来源、它们解锁了什么、还差什么"必须是**程序能回答的问题**，而不是只能靠读源码才知道。
+
+`providers/manifest.py` 为每个来源声明一份清单：能力、所需凭据、费用说明、**时效性说明**、以及诚实的状态。
+
+| 状态 | 含义 |
+|---|---|
+| `available` | 已实现，无需任何凭据即可使用 |
+| `needs_credentials` | 已实现，但需要使用者填入凭据 |
+| `planned` | 只在计划中，**尚未实现** |
+
+关键点：**列在清单里不等于能用**。`planned` 的源（目前是高德）会出现在目录里，但**不贡献任何能力覆盖**，矩阵里也查不到它。有测试断言这一点——把设计中的东西算成能力，就是自我吹嘘。
+
+`GET /api/v1/providers/catalog` 返回清单、能力矩阵和缺失凭据，用于渲染设置页。两条防漂移测试保证它不说谎：
+
+1. 清单声明的每个能力，都必须是 `CAPABILITY_BY_METHOD` 真能路由的方法；
+2. 清单声明的每个 provider 名，都必须真的被 `build_free_providers()` 注册。
+
+每个可用源还必须声明自己的**时效性**（有测试强制）。原因见 [realtime-data.md](realtime-data.md)：旅游攻略面向未来，只能用近期数据。
+
+凭据如何保存与加密见 [credentials.md](credentials.md)。
+
 ## 运行时保障
 
 统一 `ProviderRuntime` 负责：

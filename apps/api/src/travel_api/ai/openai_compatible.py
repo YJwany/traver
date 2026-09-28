@@ -31,8 +31,12 @@ class OpenAICompatibleAdapter:
         self.max_tokens = max_tokens
 
     async def complete(self, request: AIRequest) -> AIResponse:
-        if not self.api_key:
-            raise AIAdapterError("AI_API_KEY is not configured")
+        # An empty key is allowed and simply omits the Authorization header. Local
+        # OpenAI-compatible servers (Ollama, LM Studio, vLLM) are keyless, and
+        # refusing them here made "bring your own model" impossible for the most
+        # common self-hosted choice. A remote endpoint that does require a key
+        # answers 401, which is a truthful error from the service that owns the
+        # rule rather than a guess made locally.
         messages = request.messages or [
             {"role": "system", "content": request.system_instruction},
             {"role": "user", "content": request.user_input},
@@ -49,15 +53,16 @@ class OpenAICompatibleAdapter:
         if request.response_format:
             body["response_format"] = request.response_format
 
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         started = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(
                     f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=headers,
                     json=body,
                 )
                 response.raise_for_status()

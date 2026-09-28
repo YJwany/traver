@@ -20,6 +20,12 @@ dependencies = [
   # including commercial. This replaces a web API whose terms allowed free use
   # only for private/non-profit projects; see providers/free/holidays_provider.py.
   "holidays>=0.60,<1.0",
+  # Authenticated encryption for the credential vault. A user's own third-party
+  # API keys are the opposite of Traver's own bearer keys: Traver only ever needs
+  # to *verify* its own keys, so those are stored as a one-way hash, but it must
+  # *replay* a user's key to the upstream service, so those have to be
+  # recoverable and are therefore encrypted with AES-256-GCM at rest.
+  "cryptography>=43,<50",
 ]
 
 [project.optional-dependencies]

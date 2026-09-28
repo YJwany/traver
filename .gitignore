@@ -16,6 +16,12 @@ travel.db
 *.db-shm
 !docs/**/*.db
 *.sqlite3
+# Credential-vault master key. This decrypts every stored third-party API key, so
+# committing it would hand out all of them at once. Ignored by name and by the
+# generic pattern so a renamed or relocated key file cannot be committed either.
+.traver-credential-key
+*.credential-key
+**/.traver-credential-key
 node_modules/
 .next/
 dist/

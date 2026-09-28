@@ -4,7 +4,19 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, Date, DateTime, Integer, Numeric, String, Text, Uuid, create_engine
+from sqlalchemy import (
+    JSON,
+    Date,
+    DateTime,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    create_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -379,6 +391,45 @@ class ApiKeyRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CredentialRecord(Base):
+    """An operator-supplied third-party credential, sealed at rest.
+
+    Deliberately a different table from ``api_keys``: those are Traver's own
+    bearer keys and are stored as a one-way hash because they are only ever
+    verified. These have to be replayed to the upstream service, so they must be
+    recoverable, and are therefore encrypted with AES-256-GCM under a master key
+    that is not in this database (see ``services/credentials.py``).
+
+    The owner/provider/name triple is bound into the ciphertext as associated
+    data, so a row moved to another owner fails to decrypt rather than leaking
+    one tenant's key to another.
+    """
+
+    __tablename__ = "credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "provider_id",
+            "credential_key",
+            name="uq_credentials_owner_provider_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    #: Owner the credential belongs to; every read filters on it.
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    #: Manifest id of the source it configures, e.g. "openai-compatible".
+    provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Credential key within that source, e.g. "ai_api_key".
+    credential_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: nonce || AES-256-GCM ciphertext+tag. Never logged, never returned by the API.
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    #: Which master-key generation sealed this row, so rotation stays possible.
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 def create_engine_from_url(database_url: str):

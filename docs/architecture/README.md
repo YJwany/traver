@@ -48,3 +48,13 @@ API / Web Presentation Layer
 - ToolRegistry 和 AI Adapter Contract；模型尚未接入，工具返回结构化 JSON
 
 持久化采用“Trip 聚合状态 JSON + 可查询事实/快照子表”组合：聚合回读保证 API 一致性，子表为价格历史、来源追溯、路线和决策分析提供查询基础。
+
+## 插件化与自带密钥
+
+Traver 本身不提供数据，也不绑定模型。这两件事都由使用者接入，因此有三块基础设施专门服务于"接入"：
+
+- [provider-system.md](provider-system.md) — Provider 清单与能力矩阵：有哪些来源、解锁了什么、还差什么。
+- [credentials.md](credentials.md) — 凭据保险箱：加密可逆、按属主隔离、环境变量作兜底、界面保存免重启。
+- [realtime-data.md](realtime-data.md) — 时效性硬约束：面向未来的攻略只能用近期数据。
+
+设计原则是**渐进增强**：0 配置必须可用（免密钥数据源 + 本地确定性规划器），每接入一个源就解锁一批能力。不存在"必须先填 5 个 Key 才有输出"的情况。

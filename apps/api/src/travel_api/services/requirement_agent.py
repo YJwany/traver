@@ -78,10 +78,18 @@ class RequirementAgent:
     def __init__(self, adapter: AIProvider | None = None) -> None:
         self.adapter = adapter
 
-    async def understand(self, text: str) -> TripRequirement:
-        if self.adapter is not None:
+    async def understand(self, text: str, *, adapter: AIProvider | None = None) -> TripRequirement:
+        """Extract requirements, optionally with a caller-supplied model.
+
+        ``adapter`` overrides the one passed to the constructor so a per-owner
+        model can be used without rebuilding the agent. ``None`` means "use the
+        constructor's", not "use no model", which is why this is a keyword-only
+        override rather than a replacement.
+        """
+        effective = adapter if adapter is not None else self.adapter
+        if effective is not None:
             try:
-                response = await self.adapter.complete(
+                response = await effective.complete(
                     AIRequest(
                         system_instruction=(
                             "Extract travel requirements as JSON. Do not invent dates, "

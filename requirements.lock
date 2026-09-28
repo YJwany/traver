@@ -19,10 +19,14 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+cffi==2.1.1
+    # via cryptography
 click==8.5.0
     # via uvicorn
 colorama==0.4.6
     # via pytest
+cryptography==49.0.0
+    # via travel-information-system (pyproject.toml)
 fastapi==0.141.1
     # via travel-information-system (pyproject.toml)
 h11==0.16.0
@@ -55,6 +59,8 @@ psycopg==3.3.6
     # via travel-information-system (pyproject.toml)
 psycopg-binary==3.3.6
     # via psycopg
+pycparser==3.0
+    # via cffi
 pydantic==2.13.5
     # via
     #   fastapi
