@@ -1,0 +1,294 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from decimal import Decimal
+
+from travel_api.domain.models import (
+    Attraction,
+    BudgetBreakdown,
+    BudgetItem,
+    BudgetItemStatus,
+    BudgetStrategyName,
+    HotelOffer,
+    Restaurant,
+    RouteLeg,
+    TripProfile,
+)
+
+
+@dataclass(frozen=True)
+class PriceFallback:
+    """Documented allowances used when no priced source exists for a category.
+
+    The free data layer (OpenStreetMap, Open-Meteo, OSRM) carries geo facts but
+    no commercial prices. Without a fallback the whole budget collapses to zero,
+    which is arguably worse than an explicit estimate: it silently hides the
+    traveller's largest cost. These values are planning allowances, never facts,
+    and every item they produce is flagged ``is_estimate=True``.
+
+    Override them from settings when a real commercial provider is added.
+    """
+
+    hotel_per_night: Decimal = Decimal("400")
+    food_per_person_per_day: Decimal = Decimal("120")
+    attraction_per_person_per_day: Decimal = Decimal("80")
+    transport_per_person_per_day: Decimal = Decimal("50")
+
+
+@dataclass(frozen=True)
+class BudgetAdjustment:
+    category: str
+    description: str
+    savings: Decimal
+    impact_score: float
+    source_id: str | None = None
+
+
+@dataclass(frozen=True)
+class BudgetStrategy:
+    name: BudgetStrategyName
+    hotel_weight: float
+    food_weight: float
+    transport_weight: float
+    comfort_penalty: float
+
+    @classmethod
+    def from_name(cls, name: BudgetStrategyName | str) -> "BudgetStrategy":
+        name = BudgetStrategyName(name)
+        configurations = {
+            BudgetStrategyName.STRICT: cls(name, 1.4, 0.9, 1.0, 1.3),
+            BudgetStrategyName.BALANCED: cls(name, 1.0, 1.0, 1.0, 1.0),
+            BudgetStrategyName.COMFORT: cls(name, 0.7, 1.2, 0.8, 0.6),
+            BudgetStrategyName.TIME_FIRST: cls(name, 0.6, 0.8, 1.5, 0.5),
+            BudgetStrategyName.FOOD_FIRST: cls(name, 0.8, 1.6, 0.9, 0.8),
+        }
+        return configurations[name]
+
+
+class BudgetEngine:
+    def __init__(self, fallback: PriceFallback | None = None) -> None:
+        self.fallback = fallback or PriceFallback()
+
+    def calculate(
+        self,
+        profile: TripProfile,
+        selected_offer: HotelOffer | None,
+        restaurants: list[Restaurant],
+        attractions: list[Attraction],
+        routes: list[RouteLeg],
+        strategy: BudgetStrategyName | str = BudgetStrategyName.BALANCED,
+    ) -> BudgetBreakdown:
+        selected_strategy = BudgetStrategy.from_name(strategy)
+        nights = max(profile.nights, 1)
+        items: list[BudgetItem] = []
+
+        # -- hotel ---------------------------------------------------------
+        if selected_offer:
+            items.append(
+                BudgetItem(
+                    category="hotel",
+                    amount=selected_offer.total_price,
+                    status=BudgetItemStatus.OBSERVED,
+                    source_reference_ids=[selected_offer.source_reference.source_id],
+                    is_estimate=False,
+                )
+            )
+        else:
+            # No commercial offer exists (for example an OSM-only data layer).
+            # The hotel line must still appear, clearly marked as an allowance.
+            items.append(
+                BudgetItem(
+                    category="hotel",
+                    amount=self.fallback.hotel_per_night * nights * profile.travelers,
+                    status=BudgetItemStatus.ESTIMATED,
+                    is_estimate=True,
+                )
+            )
+
+        # -- food ----------------------------------------------------------
+        priced_restaurants = [
+            restaurant for restaurant in restaurants if restaurant.average_cost is not None
+        ]
+        if priced_restaurants:
+            food_per_person = sum(
+                (restaurant.average_cost.value for restaurant in priced_restaurants),
+                Decimal("0"),
+            )
+            food = food_per_person * profile.travelers * nights
+            food_estimated = all(
+                restaurant.average_cost.is_estimate for restaurant in priced_restaurants
+            )
+        else:
+            food = self.fallback.food_per_person_per_day * profile.travelers * nights
+            food_estimated = True
+        items.append(
+            BudgetItem(
+                category="food",
+                amount=food,
+                status=(
+                    BudgetItemStatus.ESTIMATED if food_estimated else BudgetItemStatus.OBSERVED
+                ),
+                is_estimate=food_estimated,
+            )
+        )
+
+        # -- attractions ---------------------------------------------------
+        priced_attractions = [
+            attraction for attraction in attractions if attraction.ticket_price is not None
+        ]
+        if priced_attractions:
+            attraction = (
+                sum((item.ticket_price.value for item in priced_attractions), Decimal("0"))
+                * profile.travelers
+            )
+            attraction_estimated = all(item.ticket_price.is_estimate for item in priced_attractions)
+            attraction_refs = [
+                ref.source_id for item in priced_attractions for ref in item.source_references
+            ]
+        else:
+            attraction = self.fallback.attraction_per_person_per_day * profile.travelers * nights
+            attraction_estimated = True
+            attraction_refs = []
+        items.append(
+            BudgetItem(
+                category="attraction",
+                amount=attraction,
+                status=(
+                    BudgetItemStatus.ESTIMATED
+                    if attraction_estimated
+                    else BudgetItemStatus.OBSERVED
+                ),
+                source_reference_ids=attraction_refs,
+                is_estimate=attraction_estimated,
+            )
+        )
+
+        # -- transport -----------------------------------------------------
+        priced_routes = [route for route in routes if route.cost is not None]
+        if priced_routes:
+            transport = (
+                sum((route.cost.value for route in priced_routes), Decimal("0")) * profile.travelers
+            )
+            transport_estimated = all(route.cost.is_estimate for route in priced_routes)
+            transport_refs = [route.source_reference.source_id for route in priced_routes]
+        else:
+            # Walking legs carry no fare, so a car-free plan has no observed
+            # transport cost at all.
+            transport = self.fallback.transport_per_person_per_day * profile.travelers * nights
+            transport_estimated = True
+            transport_refs = []
+        items.append(
+            BudgetItem(
+                category="transport",
+                amount=transport,
+                status=(
+                    BudgetItemStatus.ESTIMATED if transport_estimated else BudgetItemStatus.OBSERVED
+                ),
+                source_reference_ids=transport_refs,
+                is_estimate=transport_estimated,
+            )
+        )
+
+        items.append(
+            BudgetItem(
+                category="miscellaneous",
+                amount=Decimal("0"),
+                status=BudgetItemStatus.PLANNED,
+                is_estimate=True,
+            )
+        )
+        total = sum((item.amount for item in items), Decimal("0"))
+        remaining = profile.total_budget - total if profile.total_budget is not None else None
+        return BudgetBreakdown(
+            items=items,
+            total=total,
+            budget_limit=profile.total_budget,
+            remaining=remaining,
+            over_budget=remaining is not None and remaining < 0,
+            strategy=selected_strategy.name,
+        )
+
+    def reallocate(
+        self,
+        budget: BudgetBreakdown,
+        alternative_hotel_savings: list[Decimal] = (),
+        food_savings: list[Decimal] = (),
+        transport_savings: list[Decimal] = (),
+    ) -> list[list[BudgetAdjustment]]:
+        if not budget.over_budget or budget.remaining is None:
+            return []
+        target = abs(budget.remaining)
+        options: list[list[BudgetAdjustment]] = []
+        for savings in alternative_hotel_savings:
+            if savings >= target:
+                options.append(
+                    [
+                        BudgetAdjustment(
+                            category="hotel",
+                            description="replace hotel with a lower-cost eligible offer",
+                            savings=savings,
+                            impact_score=0.8,
+                        )
+                    ]
+                )
+        for savings in food_savings:
+            if savings >= target:
+                options.append(
+                    [
+                        BudgetAdjustment(
+                            category="food",
+                            description="replace one meal with a lower-cost candidate",
+                            savings=savings,
+                            impact_score=0.6,
+                        )
+                    ]
+                )
+        for hotel_saving in alternative_hotel_savings:
+            for food_saving in food_savings:
+                if hotel_saving + food_saving >= target:
+                    options.append(
+                        [
+                            BudgetAdjustment(
+                                category="hotel",
+                                description="replace hotel with a lower-cost eligible offer",
+                                savings=hotel_saving,
+                                impact_score=0.8,
+                            ),
+                            BudgetAdjustment(
+                                category="food",
+                                description="replace one meal with a lower-cost candidate",
+                                savings=food_saving,
+                                impact_score=0.6,
+                            ),
+                        ]
+                    )
+        for savings in transport_savings:
+            if savings >= target:
+                options.append(
+                    [
+                        BudgetAdjustment(
+                            category="transport",
+                            description="use a lower-cost route",
+                            savings=savings,
+                            impact_score=0.7,
+                        )
+                    ]
+                )
+        return sorted(
+            options,
+            key=lambda option: (
+                sum(item.impact_score for item in option),
+                -sum(item.savings for item in option),
+                len(option),
+            ),
+        )
+
+
+def calculate_budget(
+    profile: TripProfile,
+    selected_offer: HotelOffer | None,
+    restaurants: list[Restaurant],
+    attractions: list[Attraction],
+    routes: list[RouteLeg],
+) -> BudgetBreakdown:
+    return BudgetEngine().calculate(profile, selected_offer, restaurants, attractions, routes)

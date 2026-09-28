@@ -1,0 +1,5 @@
+[
+  {"source":"ctrip-mock","source_id":"ctrip-mock-hotel-a","name":"成都天际酒店","aliases":["成都天际酒店(春熙路店)"],"city":"成都","address":"春熙路东大街 88 号","latitude":30.6574,"longitude":104.0817,"rating":4.8,"review_count":12480},
+  {"source":"tongcheng-mock","source_id":"tongcheng-mock-hotel-b","name":"锦江花园酒店","aliases":["成都锦江花园"],"city":"成都","address":"红星路三段 18 号","latitude":30.6512,"longitude":104.0871,"rating":4.6,"review_count":8930}
+]
+

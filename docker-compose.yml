@@ -1,0 +1,115 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: travel
+      POSTGRES_USER: travel
+      # No default password. Previously this was the literal "travel", which is a
+      # working credential published in the repository. Compose now refuses to
+      # start until a real one is supplied:
+      #     $env:POSTGRES_PASSWORD = "<something long>"
+      # For local-only use you can put it in a `.env` file next to this one,
+      # which is gitignored.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD before starting the stack}
+    ports:
+      # Bound to loopback so the database is not reachable from the network on a
+      # developer machine or a shared host.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travel -d travel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    # Kept available for local experimentation only: the API does not read
+    # REDIS_URL and nothing imports the redis package, so this service is not
+    # part of the request path. Caching is in-process and TTL-based today.
+    profiles: ["extras"]
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      APP_ENV: development
+      LOG_LEVEL: INFO
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://travel:${POSTGRES_PASSWORD}@postgres:5432/travel
+      # Free, keyless sources are the default data layer. Mock providers are
+      # explicitly OFF so synthetic places and prices never mix into real
+      # results; that is the whole point of the free-provider default.
+      FREE_PROVIDERS_ENABLED: "true"
+      MOCK_PROVIDER_ENABLED: "false"
+      # Authentication defaults to off in Settings, but a container is reachable
+      # from other machines, so this stack turns it on. Create the first key
+      # with:
+      #   docker compose exec api python -m travel_api.cli create-key --owner me
+      AUTH_ENABLED: "${AUTH_ENABLED:-true}"
+      AUTH_BOOTSTRAP_KEY: "${AUTH_BOOTSTRAP_KEY:-}"
+      # The Web app is served from the host, not from this compose network.
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./apps/api/src:/app/apps/api/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+    # Reads API_HOST/API_PORT/LOG_LEVEL from Settings, so those settings are live
+    # rather than decorative. Reload is enabled by APP_ENV=development.
+    command: ["python", "-m", "travel_api"]
+
+  # Production-shaped API: no bind mount, no reload, non-root user, installed
+  # from requirements.lock. Enable with:  docker compose --profile prod up
+  api-prod:
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: docker/api.prod.Dockerfile
+    environment:
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://travel:${POSTGRES_PASSWORD}@postgres:5432/travel
+      FREE_PROVIDERS_ENABLED: "true"
+      MOCK_PROVIDER_ENABLED: "false"
+      # Migrations are the schema owner in production; create_all must not race
+      # them or silently diverge.
+      AUTO_CREATE_SCHEMA: "false"
+      AUTH_ENABLED: "true"
+      AUTH_BOOTSTRAP_KEY: "${AUTH_BOOTSTRAP_KEY:-}"
+      CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - "python -m alembic upgrade head && python -m travel_api"
+
+volumes:
+  postgres_data:

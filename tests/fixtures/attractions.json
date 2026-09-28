@@ -1,0 +1,4 @@
+[
+  {"source":"amap-mock","source_id":"amap-mock-attraction-wuhou","name":"武侯祠","city":"成都","address":"武侯祠大街 231 号","latitude":30.6495,"longitude":104.0432,"rating":4.7,"ticket_price":50,"currency":"CNY","opening_hours":{"opens_at":"09:00","closes_at":"18:00"},"recommended_duration_minutes":120}
+]
+
