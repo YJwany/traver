@@ -28,7 +28,7 @@ from travel_api.domain.models import (
 from travel_api.providers.base import resolve_travel_mode
 from travel_api.providers.registry import ProviderRegistry
 from travel_api.services.budget_engine import BudgetEngine
-from travel_api.services.decision_engine import score_hotel_offers
+from travel_api.services.decision_engine import plan_geography, score_hotel_offers
 from travel_api.services.entity_resolution import (
     deduplicate_attractions,
     deduplicate_hotels,
@@ -524,7 +524,13 @@ async def build_preview(
     ]
     await reporter.finish_step()
 
-    decisions = score_hotel_offers(hotels, offers, profile)
+    # The plan's own geography, taken from the points just aggregated. Passed in rather than
+    # looked up inside the scorer, because the scorer has no way to know where this itinerary
+    # is — and a scorer that guesses is how a hardcoded 成都 coordinate survived here.
+    geography = plan_geography(
+        [item.location for item in attractions] + [item.location for item in restaurants]
+    )
+    decisions = score_hotel_offers(hotels, offers, profile, geography=geography)
     selected_offer = None
     if decisions and not decisions[0].failed_constraints:
         selected_offer = next(

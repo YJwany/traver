@@ -585,11 +585,27 @@ class TripProfile(BaseModel):
 
 
 class ScoreBreakdown(BaseModel):
+    """One decision's dimensions, each either measured or explicitly absent.
+
+    ``transit`` and ``location`` are optional because they depend on the plan having located
+    points to compare against, and there are plans that have none. ``None`` means **not
+    measured** and is deliberately not spelled ``0.0``: a zero reads as "worst possible",
+    which is a measurement, and a reader — or a later scorer — cannot tell the two apart from
+    the value alone.
+
+    The other four are always computable: the price comes from the offer, the rating from the
+    hotel, and the last two from the profile. So they are required, and a missing one is a bug
+    rather than a fact about the data.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     price: float
-    location: float
-    transit: float
+    #: Whether the hotel is in the district the plan mostly sits in. ``None`` when either side
+    #: has no district, which is not the same as "a different district".
+    location: float | None = None
+    #: Distance to the plan's own centre. ``None`` when the plan located no points.
+    transit: float | None = None
     rating: float
     itinerary_fit: float
     user_preference: float
