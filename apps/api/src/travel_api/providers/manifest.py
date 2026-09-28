@@ -60,6 +60,59 @@ CAPABILITY_ASPECTS: dict[str, dict[str, str]] = {
     },
 }
 
+#: How a routing aspect maps onto the ``TravelMode`` a request would carry.
+#:
+#: This mapping did not exist before, and its absence is the whole reason the 公交/地铁
+#: defect survived: the aspect vocabulary ("driving", "walking", "transit") and the mode
+#: vocabulary ("drive", "walk", "transit") are two names for the same thing, and nothing in
+#: the code said which aspect corresponded to which mode. So when ``mode_for_pace`` could
+#: only ever return ``WALK`` or ``DRIVE``, nothing noticed that ``transit`` had no producer
+#: — the two lists were never compared.
+#:
+#: Writing the correspondence down makes the comparison possible, and
+#: ``scripts/probe_reachable_aspects.py`` performs it. An aspect absent from this mapping
+#: must be declared in ``ASPECTS_NEEDING_TOOL_SUPPORT``, or it is an aspect no request can
+#: name.
+ASPECT_TRAVEL_MODES: dict[str, str] = {
+    "driving": "drive",
+    "walking": "walk",
+    "transit": "transit",
+    # No "cycling": TravelMode has no such member, which is what puts it in
+    # ASPECTS_NEEDING_TOOL_SUPPORT below rather than in this table.
+}
+
+#: Aspects that **no configuration can ever activate**, because the tool itself has no way
+#: to ask for them.
+#:
+#: This distinction is the difference between two pieces of advice, and only one of them
+#: helps:
+#:
+#:   * "no source serves this yet, supply one" — actionable today, and the capability
+#:     matrix already says which source and which credential;
+#:   * "the tool cannot express this at all" — not actionable, and telling someone to
+#:     connect a source would send them looking for something that does not exist.
+#:
+#: Cycling is the second kind. ``TravelMode`` has no cycling member, so no itinerary can
+#: contain a bike leg and no routing request is ever made for one. FOSSGIS *does* publish a
+#: real ``bike`` profile, which is exactly what makes the mistake tempting: the data exists,
+#: so the gap looks like a supply problem. It is a demand problem — the matrix answers "can
+#: this tool plan it", not "could a server route it".
+ASPECTS_NEEDING_TOOL_SUPPORT: dict[str, str] = {
+    "cycling": (
+        "行程里没有任何一种交通方式对应骑行：TravelMode 没有骑行成员，规划器也不会请求它，"
+        "所以接入任何来源都不会出现骑行路线。要支持骑行需要先改这个工具本身，"
+        "而不是再填一个 Key。"
+    ),
+}
+
+#: How a gap can be closed, so a client never has to guess.
+#:
+#: ``source`` — a credential or a new source would do it. ``tool`` — only a change to this
+#: program would. Rendering the two identically is what turns a roadmap item into an
+#: instruction the user cannot follow.
+CLOSABLE_BY_SOURCE = "source"
+CLOSABLE_BY_TOOL = "tool"
+
 #: Canonical capability order, so the matrix renders identically every time.
 CAPABILITY_ORDER: tuple[str, ...] = tuple(CAPABILITY_LABELS)
 
@@ -459,11 +512,27 @@ def _provider_declines_aspect(
     )
 
 
+def aspect_is_requestable(aspect: str) -> bool:
+    """Whether a request can name this aspect at all.
+
+    True when some ``TravelMode`` member corresponds to it, per ``ASPECT_TRAVEL_MODES``.
+    An aspect that is neither requestable nor declared in
+    ``ASPECTS_NEEDING_TOOL_SUPPORT`` is an undeclared dead end: the matrix will offer it as
+    a gap a source could fill, and no source can.
+    """
+    return aspect in ASPECT_TRAVEL_MODES
+
+
+def aspect_closable_by(aspect: str) -> str:
+    """Who could close a gap in this aspect: a source, or only a change to the tool."""
+    return CLOSABLE_BY_TOOL if aspect in ASPECTS_NEEDING_TOOL_SUPPORT else CLOSABLE_BY_SOURCE
+
+
 def _aspect_rows(
     capability: str,
-    registered: set[str],
+    registered: Iterable[str],
     live: Mapping[str, set[str]] | None = None,
-    unserved_aspects: "Mapping[str, Mapping[str, frozenset[str]]] | None" = None,
+    unserved_aspects: Mapping[str, Mapping[str, frozenset[str]]] | None = None,
 ) -> list[dict]:
     """Per-aspect coverage for a capability that decomposes.
 
@@ -493,6 +562,11 @@ def _aspect_rows(
                 "label": label,
                 "covered": bool(providers),
                 "providers": providers,
+                # Stated for every aspect, covered or not, so a client never has to infer
+                # whether the gap it is describing is one the reader can act on.
+                "closable_by": aspect_closable_by(aspect),
+                "requestable": aspect_is_requestable(aspect),
+                "note": ASPECTS_NEEDING_TOOL_SUPPORT.get(aspect, ""),
             }
         )
     return rows
@@ -599,6 +673,10 @@ def capability_gaps(
                 "capability": row["capability"],
                 "label": row["label"],
                 "note": CAPABILITY_GAP_NOTES.get(row["capability"], ""),
+                # A capability no entry declares is a supply gap by construction: if any
+                # source could serve it, its manifest would say so and it would have been
+                # filtered out as unlockable above.
+                "closable_by": CLOSABLE_BY_SOURCE,
             }
         )
     return gaps
@@ -616,6 +694,10 @@ def uncovered_aspects(
     journeys and silently not for others — which is worse, because nothing in the
     UI would otherwise hint at it. A trip that needs 公交/地铁 would just be
     planned as if driving were the only option.
+
+    Each gap carries ``closable_by`` so the caller can tell "connect a source" from "this
+    tool cannot do it yet". Both are real gaps; they are not the same advice, and only one
+    of them is followable.
     """
     gaps: list[dict] = []
     for row in capability_matrix(registered_names, live_providers, unserved_aspects):
@@ -627,6 +709,9 @@ def uncovered_aspects(
                         "capability_label": row["label"],
                         "aspect": aspect["aspect"],
                         "label": aspect["label"],
+                        "closable_by": aspect["closable_by"],
+                        "requestable": aspect["requestable"],
+                        "note": aspect["note"],
                     }
                 )
     return gaps

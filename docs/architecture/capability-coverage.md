@@ -65,9 +65,9 @@ assert payload["uncovered_capabilities"] == [], (
 [NONE] search_room_offers  providers=[]
 [PART] calculate_routes    providers=['osrm']
          ok  driving      驾车      ['osrm']
-         MISS transit     公交/地铁  []
-         MISS walking     步行      []
-         MISS cycling     骑行      []
+         MISS transit     公交/地铁  []    closable_by=source
+         MISS walking     步行      []    closable_by=source
+         MISS cycling     骑行      []    closable_by=tool
 ```
 
 `uncovered_capabilities` 是个 id 列表（计数用），`capability_gaps` 带上原因：
@@ -81,6 +81,23 @@ assert payload["uncovered_capabilities"] == [], (
 ```
 
 两者分开是刻意的：**「没人能提供」和「你还没配置」的补救方式完全相反**。公交地铁属于后者——高德能提供，只差一个 Key，所以它走 `uncovered_aspects` ＋ 解锁提示，绝不出现在 `capability_gaps` 里。把可解的缺口标成死局，等于让用户放弃一个 Key 就能解决的事。
+
+### 第三种缺口：接什么都补不上
+
+「没人能提供」和「你还没配置」这两种分法，漏掉了第三种：**这个工具自己就不支持**。骑行是这一类——`TravelMode` 没有骑行成员，规划器不会请求它，所以接入任何来源都不会出现骑行路线。
+
+漏掉它的代价不是少一句话，而是**说错一句话**。上面那个 `closable_by=tool` 就是为此存在的：能力矩阵里骑行原来只标「缺失」，与公交地铁用同一个词；而「可补：公交/地铁、骑行」甚至把骑行算成了高德能补的东西。高德确实能算骑行路线——FOSSGIS 也有真实的 `bike` profile——正因为数据真的存在，这个错误才特别像对的。**矩阵回答的是「这个工具能不能规划它」，不是「服务器能不能算它」。**
+
+于是每一行 aspect 都带两个字段：
+
+| 字段 | 含义 | 骑行的值 | 公交地铁的值 |
+| --- | --- | --- | --- |
+| `requestable` | 有没有请求能表达它 | `false` | `true` |
+| `closable_by` | 谁能补上这个缺口 | `tool` | `source` |
+
+界面据此分开呈现：公交地铁是红色「（缺失）」（＝去接一个来源），骑行是中性色虚边的「（工具不支持）」（＝接了也没用，得先改工具）。解锁提示只列 `source` 那一类，因为「接入后才会提供」后面跟一个接不出来的东西就是假承诺。
+
+`ASPECT_TRAVEL_MODES` 是让这件事可检查的关键：aspect 的词汇（`driving` / `walking` / `transit`）和 `TravelMode` 的成员（`drive` / `walk` / `transit`）是同一件事的两个名字，而在这张表存在之前，代码里没有任何地方说明谁对应谁——所以「有个 aspect 没有任何生产者」这件事在结构上无法被发现，这正是它没被发现的原因。注意名称相似度检查在这里会**失败**（`driving` 不是 `drive`），所以对应关系必须被声明而不是推断。`scripts/probe_reachable_aspects.py` 用这张表做全面检查，`tests/unit/test_provider_catalog.py` 把不变式钉进测试。
 
 ## 这句话是不是真的
 

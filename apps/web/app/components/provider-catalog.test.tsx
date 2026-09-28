@@ -143,9 +143,25 @@ const CATALOG: Catalog = {
       missing_aspects: ["transit", "cycling"],
       aspects: [
         { aspect: "driving", label: "驾车", covered: true, providers: ["osrm"] },
-        { aspect: "transit", label: "公交/地铁", covered: false, providers: [] },
+        // closable_by distinguishes the two kinds of gap, and it is the server that decides.
+        // 公交/地铁 is one credential away from working; 骑行 needs a change to the tool,
+        // because TravelMode has no cycling member for a request to carry.
+        {
+          aspect: "transit",
+          label: "公交/地铁",
+          covered: false,
+          providers: [],
+          closable_by: "source" as const,
+        },
         { aspect: "walking", label: "步行", covered: true, providers: ["osrm"] },
-        { aspect: "cycling", label: "骑行", covered: false, providers: [] },
+        {
+          aspect: "cycling",
+          label: "骑行",
+          covered: false,
+          providers: [],
+          closable_by: "tool" as const,
+          note: "行程里没有任何一种交通方式对应骑行：TravelMode 没有骑行成员。",
+        },
       ],
     },
   ],
@@ -159,6 +175,7 @@ const CATALOG: Catalog = {
       capability: "search_room_offers",
       label: "房型与报价",
       note: "房型与实时房价只存在于商业酒店渠道（携程 / Booking 的开放接口），本工具尚未接入任何一家。因此预算里的住宿部分是估算额度。",
+      closable_by: "source",
     },
   ],
   uncovered_aspects: [
@@ -167,12 +184,16 @@ const CATALOG: Catalog = {
       capability_label: "路线规划",
       aspect: "transit",
       label: "公交/地铁",
+      closable_by: "source",
+      note: "",
     },
     {
       capability: "calculate_routes",
       capability_label: "路线规划",
       aspect: "cycling",
       label: "骑行",
+      closable_by: "tool",
+      note: "TravelMode 没有骑行成员。",
     },
   ],
   vault: {
@@ -270,6 +291,53 @@ describe("ProviderCatalog", () => {
     expect(screen.queryByText(/没有任何已接入的来源能提供它/)).not.toBeInTheDocument();
   });
 
+  it("counts a gap only a code change can close apart from one a source can", async () => {
+    // The defect this guards. The panel's headline is "接上什么会更好" — connect something
+    // and this gets better. 骑行 sat in that sentence, so the count said two gaps and the
+    // reader was expected to fix both by connecting a source, which cannot work for either
+    // half of the reason: no catalogue entry serves cycling, and TravelMode has no member
+    // for a request to carry it in. The count has to split, and the second half has to say
+    // what it actually needs.
+    stubFetch(CATALOG);
+    render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    // One source-closable part (公交/地铁), not two. Asserted on the unlock panel's own
+    // sentence, because the matrix panel above it counts *capabilities* and also says
+    // "1 项只覆盖了一部分" — matching that by accident would make this test pass while the
+    // split it is guarding is broken.
+    expect(
+      await screen.findByText(/项能力完全没有来源，1 项只覆盖了一部分（路线规划·公交\/地铁）/),
+    ).toBeInTheDocument();
+    // And the tool-only part is disclosed rather than dropped: naming it is what stops the
+    // reader from concluding that routing is fine.
+    expect(screen.getByText(/另有 1 项这个工具本身还不支持（骑行）/)).toBeInTheDocument();
+    expect(screen.getByText(/接入任何来源都不会改变，需要先改工具/)).toBeInTheDocument();
+  });
+
+  it("treats an aspect with no closable_by as source-closable", async () => {
+    // Backward compatibility in the direction that cannot overstate a limitation. An older
+    // API says nothing about who can close a gap, and every aspect but cycling is
+    // source-closable, so the safe reading is the one that does not invent a limitation
+    // the server never claimed.
+    const rows = CATALOG.capabilities.map((row) => ({
+      ...row,
+      aspects: row.aspects.map(({ closable_by: _dropped, note: _note, ...rest }) => rest),
+    }));
+    const aspects = CATALOG.uncovered_aspects.map(
+      ({ closable_by: _dropped, note: _note, ...rest }) => rest,
+    );
+    stubFetch({ ...CATALOG, capabilities: rows, uncovered_aspects: aspects });
+    render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    // Both are back to being counted as source-closable, and neither is called a tool
+    // limitation.
+    expect(
+      await screen.findByText(/项能力完全没有来源，2 项只覆盖了一部分（路线规划·公交\/地铁、路线规划·骑行）/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/这个工具本身还不支持/)).not.toBeInTheDocument();
+    expect(screen.queryByText("骑行（工具不支持）")).toBeNull();
+  });
+
   it("names the missing parts of a partially covered capability", async () => {
     // The defect this guards: routing read as covered because driving works,
     // with 公交/地铁 absent and nothing in the UI saying so.
@@ -282,7 +350,12 @@ describe("ProviderCatalog", () => {
 
     expect(scope.getByText("驾车")).toBeInTheDocument();
     expect(scope.getByText("公交/地铁（缺失）")).toBeInTheDocument();
-    expect(scope.getByText("骑行（缺失）")).toBeInTheDocument();
+    // 骑行 is not "缺失" — 缺失 is the word for "no source supplies this yet", and it appears
+    // everywhere else in this panel next to an instruction to connect one. Cycling has no
+    // source to connect: the tool cannot request a bike route at all, so it is labelled as
+    // the different thing it is.
+    expect(scope.getByText("骑行（工具不支持）")).toBeInTheDocument();
+    expect(scope.queryByText("骑行（缺失）")).toBeNull();
     // 步行 is served now, so it must NOT be marked missing — reporting a part as absent when
     // it works is the same error as the reverse, told the other way round.
     expect(scope.queryByText("步行（缺失）")).toBeNull();
@@ -297,10 +370,12 @@ describe("ProviderCatalog", () => {
     render(<ProviderCatalog apiUrl="http://api.test" />);
 
     // The unlock hint names the specific missing parts rather than the whole
-    // capability, since driving and walking already work.
-    expect(
-      await screen.findByText(/接入后才会提供路线规划：公交\/地铁、骑行/),
-    ).toBeInTheDocument();
+    // capability, since driving and walking already work. 骑行 is absent from it because
+    // the sentence is "接入后才会提供" — after you connect it, this will work — and no
+    // amount of connecting makes cycling work. Listing it would be a false promise in the
+    // one place a user goes to find out what to do.
+    expect(await screen.findByText(/接入后才会提供路线规划：公交\/地铁$/)).toBeInTheDocument();
+    expect(screen.queryByText(/接入后才会提供路线规划：.*骑行/)).toBeNull();
     // And it is still labelled as unimplemented while being offered.
     expect(screen.getAllByText(/尚未实现/).length).toBeGreaterThan(0);
   });
@@ -327,8 +402,11 @@ describe("ProviderCatalog", () => {
     const scope = within(cardFor("高德地图（AMap）"));
 
     // "可补" and not "缺失": 高德 can close the transit gap once it exists, so the
-    // card must show it as the fix rather than as a capability nothing serves.
-    expect(scope.getByText("路线规划（可补：公交/地铁、骑行）")).toBeInTheDocument();
+    // card must show it as the fix rather than as a capability nothing serves. 骑行 is not
+    // in the list for the opposite reason — 高德 could route a bike, but this tool would
+    // never ask it to, so it is not something 高德 fixes.
+    expect(scope.getByText("路线规划（可补：公交/地铁）")).toBeInTheDocument();
+    expect(scope.queryByText(/路线规划（可补：.*骑行/)).toBeNull();
     expect(scope.queryByText("路线规划（缺失）")).toBeNull();
   });
 

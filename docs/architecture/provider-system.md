@@ -99,7 +99,7 @@ Traver 定位是"汇总工具"：它自己不带任何数据，也不绑定任�
 
 高德接入后这条依然成立，而且更重要了：高德声明驾车/公交地铁/步行三个 aspect，**刻意不声明骑行**——`TravelMode` 里没有骑行、`mode_for_pace()` 也不可能返回它，所以没有任何行程会请求骑行路线。声明它只会让矩阵多一个永远无法兑现的勾。于是配置了 Key 之后矩阵会显示 `covered=true` 而 `complete=false`、`missing_aspects=["cycling"]`：**解锁了，但没解锁全部**，这正是要如实说出的话。
 
-`CAPABILITY_ASPECTS` 把这类能力拆成若干部分（`calculate_routes` → 驾车/公交地铁/步行/骑行），每个源声明自己真正提供哪些。于是矩阵对一行给出两个独立事实：
+`CAPABILITY_ASPECTS` 把这类能力拆成若干部分（`calculate_routes` → 驾车/公交地铁/步行/骑行），每个源声明自己真正提供哪些。于是矩阵对一行给出若干独立事实：
 
 | 字段 | 含义 |
 |---|---|
@@ -107,6 +107,10 @@ Traver 定位是"汇总工具"：它自己不带任何数据，也不绑定任�
 | `complete` | **所有**部分都有来源 —— 路线规划真的没问题 |
 | `missing_aspects` | 缺哪几块 |
 | `aspects[]` | 每一块各自的 `covered` 与来源 |
+| `aspects[].requestable` | 有没有请求能表达这一块 |
+| `aspects[].closable_by` | `source`（接个来源就行）还是 `tool`（得先改工具） |
+
+`requestable` 与 `closable_by` 是「缺失」这个词不够用之后加的。骑行与公交地铁在旧字段下完全同形——都是 `covered=false`、都在 `missing_aspects` 里、都被渲染成「缺失」——但补救方式相反：一个接高德 Key 就好，另一个接什么都不行。**把「只有改代码才能补」的缺口渲染成「去接一个来源」，是把路线图项当成了操作说明。** 两个字段的分工是：`requestable` 是事实（请求能不能表达它），`closable_by` 是建议（该不该去配一个 Key）。`ASPECT_TRAVEL_MODES` 声明两者之间的对应关系，`scripts/probe_reachable_aspects.py` 据此全面检查，避免再出现「实现了但没有生产者」的那类缺口。
 
 `uncovered_aspects` 与 `uncovered_capabilities` 分开上报：能力缺失是功能不存在，aspect 缺失是**功能对部分行程有效、对其余静默失效**——后者更危险，因为界面上看不出任何异常。
 

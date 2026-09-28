@@ -97,9 +97,21 @@ function routingRows(): CapabilityRow[] {
       missing_aspects: ["transit", "cycling"],
       aspects: [
         { aspect: "driving", label: "驾车", covered: true, providers: ["osrm"] },
-        { aspect: "transit", label: "公交/地铁", covered: false, providers: [] },
+        {
+          aspect: "transit",
+          label: "公交/地铁",
+          covered: false,
+          providers: [],
+          closable_by: "source",
+        },
         { aspect: "walking", label: "步行", covered: true, providers: ["osrm"] },
-        { aspect: "cycling", label: "骑行", covered: false, providers: [] },
+        {
+          aspect: "cycling",
+          label: "骑行",
+          covered: false,
+          providers: [],
+          closable_by: "tool",
+        },
       ],
     }),
   ];
@@ -181,6 +193,32 @@ describe("capabilityClaims", () => {
     // named, which is what stops "已有来源" from burying 公交/地铁.
     expect(claims[0].coveredElsewhere).toBe(true);
     expect(claims[0].missingAspectLabels).toEqual(["公交/地铁", "骑行"]);
+    // But only one of those two is something this source actually closes. 高德 could route a
+    // bike; this tool would never ask it to, so crediting 高德 with 骑行 is a promise that
+    // cannot be kept by configuring anything.
+    expect(claims[0].closableAspectLabels).toEqual(["公交/地铁"]);
+    expect(claims[0].toolOnlyAspectLabels).toEqual(["骑行"]);
+  });
+
+  it("keeps a part this source serves but the tool cannot request out of the closable list", () => {
+    // The two lists partition the missing parts, so nothing is silently dropped: a gap that
+    // is real but unfixable still has to be named somewhere, or the matrix would report
+    // routing as complete once transit is configured.
+    const claims = capabilityClaims(
+      provider({
+        id: "amap",
+        status: STATUS_PLANNED,
+        active: false,
+        capabilities: ["calculate_routes"],
+        aspects: { calculate_routes: ["driving", "transit", "walking", "cycling"] },
+      }),
+      routingRows(),
+    );
+    const claim = claims[0];
+
+    expect([...claim.closableAspectLabels, ...claim.toolOnlyAspectLabels].sort()).toEqual(
+      [...claim.missingAspectLabels].sort(),
+    );
   });
 
   it("claims only the parts nothing serves, not the whole capability", () => {
@@ -339,6 +377,38 @@ describe("unlockHints", () => {
     expect(hints.planned).toEqual([
       { providerId: "amap", label: "高德地图（AMap）", unlocks: ["路线规划：公交/地铁"] },
     ]);
+  });
+
+  it("never offers a part no source could actually deliver, even to a source that lists it", () => {
+    // The defect this guards. 高德's own manifest lists cycling, and 高德 could genuinely
+    // route a bike — so the naive reading is that connecting it adds 骑行 and the hint says
+    // "接入后才会提供路线规划：公交/地铁、骑行". It cannot: TravelMode has no cycling member, so
+    // no request would ever ask for a bike route. The reader would configure a key, watch
+    // 骑行 stay missing, and have no way to tell whether they had done it wrong.
+    const hints = unlockHints(
+      catalog({
+        providers: [
+          provider({ id: "osrm", active: true, capabilities: ["calculate_routes"] }),
+          provider({
+            id: "amap",
+            label: "高德地图（AMap）",
+            status: STATUS_PLANNED,
+            active: false,
+            capabilities: ["calculate_routes"],
+            aspects: { calculate_routes: ["driving", "transit", "walking", "cycling"] },
+          }),
+        ],
+        uncovered_capabilities: [],
+        capabilities: routingRows(),
+      }),
+    );
+
+    expect(hints.planned).toEqual([
+      { providerId: "amap", label: "高德地图（AMap）", unlocks: ["路线规划：公交/地铁"] },
+    ]);
+    // Named nowhere in the unlock hints, because there is no unlocking it.
+    const offered = hints.planned.flatMap((hint) => hint.unlocks).join("");
+    expect(offered).not.toContain("骑行");
   });
 
   it("does not offer a source that would only duplicate what works", () => {

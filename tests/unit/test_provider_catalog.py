@@ -10,18 +10,25 @@ than against itself.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 from fastapi.testclient import TestClient
 from travel_api.config import Settings
+from travel_api.domain.models import TravelMode, TripProfile
 from travel_api.main import create_app
-from travel_api.providers.base import CAPABILITY_BY_METHOD
+from travel_api.providers.base import CAPABILITY_BY_METHOD, resolve_travel_mode
 from travel_api.providers.free import build_free_providers
 from travel_api.providers.manifest import (
+    ASPECT_TRAVEL_MODES,
+    ASPECTS_NEEDING_TOOL_SUPPORT,
     CAPABILITY_ASPECTS,
+    CLOSABLE_BY_SOURCE,
+    CLOSABLE_BY_TOOL,
     PROVIDER_CATALOG,
     STATUS_AVAILABLE,
     STATUS_NEEDS_CREDENTIALS,
     STATUS_PLANNED,
+    aspect_is_requestable,
     capability_matrix,
     catalog_as_dicts,
     manifest_for,
@@ -386,6 +393,129 @@ def test_uncovered_aspects_names_the_gap_and_what_it_belongs_to():
     assert by_aspect["transit"]["capability_label"] == "路线规划"
     # Driving is served, so it must not be reported as a gap.
     assert "driving" not in by_aspect
+
+
+def test_uncovered_aspects_say_who_can_close_each_gap():
+    """Two gaps with the same word and opposite remedies must not look alike.
+
+    公交/地铁 is one credential away from working. 骑行 is not reachable by any
+    configuration, because TravelMode has no cycling member for a request to carry. Both
+    are "*uncovered aspects of calculate_routes*", and a client that renders them
+    identically tells the reader to go and find a data source for the second — a search
+    that cannot succeed. FOSSGIS really does publish a bike profile, which is precisely
+    what makes the mistake tempting: the data exists, so the gap looks like supply.
+    """
+    gaps = uncovered_aspects(_free_stack_names())
+    by_aspect = {gap["aspect"]: gap for gap in gaps}
+
+    assert by_aspect["transit"]["closable_by"] == "source"
+    assert by_aspect["cycling"]["closable_by"] == "tool"
+    # And the tool-only gap explains itself, so the label is not the only signal.
+    assert by_aspect["cycling"]["note"]
+    assert "TravelMode" in by_aspect["cycling"]["note"]
+    # Nothing is invented for the source-closable one; its remedy is already in the
+    # unlock hints, and a second explanation would compete with them.
+    assert by_aspect["transit"]["note"] == ""
+
+
+def test_every_declared_aspect_is_classified_as_closable_somehow():
+    """Each aspect of a decomposable capability gets a verdict, covered or not.
+
+    A client should never have to infer the remedy from the aspect's name; the default is
+    stated on every row so "unknown" is not representable.
+    """
+    rows = capability_matrix(_free_stack_names())
+    routing = next(row for row in rows if row["capability"] == "calculate_routes")
+    assert {aspect["aspect"] for aspect in routing["aspects"]} == set(
+        CAPABILITY_ASPECTS["calculate_routes"]
+    )
+    for aspect in routing["aspects"]:
+        assert aspect["closable_by"] in {CLOSABLE_BY_SOURCE, CLOSABLE_BY_TOOL}
+        # A covered aspect is closable_by definition — it needs nothing — so the tool-only
+        # verdict must never appear on one.
+        if aspect["covered"]:
+            assert aspect["closable_by"] == CLOSABLE_BY_SOURCE
+
+
+def test_cycling_is_declared_unreachable_and_actually_is():
+    """The declaration must match the code, or it is just a comment.
+
+    ``ASPECTS_NEEDING_TOOL_SUPPORT`` claims cycling cannot be requested. That is a fact
+    about ``TravelMode`` and ``resolve_travel_mode``, both of which are imported here, so
+    the claim is checked rather than asserted in prose.
+    """
+    for aspect in ASPECTS_NEEDING_TOOL_SUPPORT:
+        assert aspect not in {mode.value for mode in TravelMode}, (
+            f"{aspect} is declared unreachable but TravelMode can express it"
+        )
+
+    profile = TripProfile(
+        destination="杭州",
+        start_date=date(2026, 10, 3),
+        end_date=date(2026, 10, 5),
+    )
+    # And no pace can derive it either, which is the other half of "no request can ask".
+    assert resolve_travel_mode(profile) is not None
+    assert isinstance(resolve_travel_mode(profile), TravelMode)
+
+
+def test_every_routing_aspect_is_either_requestable_or_a_declared_tool_limit():
+    """The invariant that would have caught the 公交/地铁 defect on the day it was written.
+
+    ``ASPECT_TRAVEL_MODES`` is the correspondence between the manifest's aspect names
+    ("driving") and ``TravelMode``'s members ("drive"). Until it existed the two lists were
+    never compared, which is why an aspect with no possible producer went unnoticed: every
+    part was correct and the wiring between them was absent.
+
+    Note a name-similarity check would *fail* this — "driving" is not "drive" — so the
+    correspondence has to be declared. This test asserts it is declared for everything.
+    """
+    for capability, aspects in CAPABILITY_ASPECTS.items():
+        for aspect in aspects:
+            requestable = aspect_is_requestable(aspect)
+            tool_limit = aspect in ASPECTS_NEEDING_TOOL_SUPPORT
+            assert requestable or tool_limit, (
+                f"{capability}.{aspect} is neither expressible by a request nor declared in "
+                f"ASPECTS_NEEDING_TOOL_SUPPORT, so the matrix offers it as a gap a source "
+                f"could fill — and no source can"
+            )
+            # The two must not both be true: an aspect declared as a tool limit cannot also
+            # be requestable, or the declaration is stale and hides a working path.
+            assert not (requestable and tool_limit), (
+                f"{capability}.{aspect} is both requestable and declared unreachable"
+            )
+
+
+def test_the_aspect_to_mode_mapping_names_real_modes():
+    """A mapping onto a mode that does not exist is worse than no mapping.
+
+    It would make an unreachable aspect look reachable, which is the direction that hides
+    a defect rather than inventing a limitation.
+    """
+    modes = {mode.value for mode in TravelMode}
+    for aspect, mode in ASPECT_TRAVEL_MODES.items():
+        assert mode in modes, f"{aspect} maps to {mode!r}, which is not a TravelMode member"
+
+
+def test_every_travel_mode_the_form_offers_can_be_resolved_back():
+    """A mode the user can choose must be reproducible from some request.
+
+    ``travel_mode`` is copied through the patch layer verbatim, so a member that
+    ``resolve_travel_mode`` never returns would be a selectable option with no path to it —
+    the 紧凑节奏 defect in a different vocabulary.
+    """
+    reached = {
+        resolve_travel_mode(
+            TripProfile(
+                destination="杭州",
+                start_date=date(2026, 10, 3),
+                end_date=date(2026, 10, 5),
+                travel_mode=mode,
+            )
+        ).value
+        for mode in TravelMode
+    }
+    assert reached == {mode.value for mode in TravelMode}
 
 
 def test_an_atomic_capability_reports_no_aspects():

@@ -91,20 +91,34 @@ function CapabilityMatrix({ catalog }: { catalog: Catalog }) {
                 is never read as "路线规划没问题". */}
             {row.aspects.length > 0 && (
               <span className="aspect-row">
-                {row.aspects.map((aspect) => (
-                  <span
-                    key={aspect.aspect}
-                    className={aspect.covered ? "aspect aspect-on" : "aspect aspect-off"}
-                    title={
-                      aspect.covered
-                        ? `由 ${aspect.providers.join("、")} 提供`
-                        : "当前没有任何来源提供"
-                    }
-                  >
-                    {aspect.label}
-                    {aspect.covered ? "" : "（缺失）"}
-                  </span>
-                ))}
+                {row.aspects.map((aspect) => {
+                  // An uncovered aspect is either "supply a source" or "this tool cannot
+                  // ask for it". Saying 缺失 for both would make the second look like a
+                  // data problem, and the reader would go looking for a data source.
+                  const toolOnly = !aspect.covered && aspect.closable_by === "tool";
+                  return (
+                    <span
+                      key={aspect.aspect}
+                      className={
+                        aspect.covered
+                          ? "aspect aspect-on"
+                          : toolOnly
+                            ? "aspect aspect-tool-only"
+                            : "aspect aspect-off"
+                      }
+                      title={
+                        aspect.covered
+                          ? `由 ${aspect.providers.join("、")} 提供`
+                          : toolOnly
+                            ? aspect.note || "当前没有任何来源提供，且本工具还不支持这种方式"
+                            : "当前没有任何来源提供"
+                      }
+                    >
+                      {aspect.label}
+                      {aspect.covered ? "" : toolOnly ? "（工具不支持）" : "（缺失）"}
+                    </span>
+                  );
+                })}
               </span>
             )}
           </li>
@@ -121,6 +135,16 @@ function UnlockPanel({ catalog }: { catalog: Catalog }) {
   // Tolerated as absent so a client built against this version can still read an older API.
   const gaps = catalog.capability_gaps ?? [];
 
+  // Split by who can close them. Both are real gaps; only one is the reader's to close,
+  // and listing a tool-only gap under "接上什么会更好" sends them hunting for a data source
+  // that does not exist.
+  const sourceClosableAspects = catalog.uncovered_aspects.filter(
+    (gap) => gap.closable_by !== "tool",
+  );
+  const toolOnlyAspects = catalog.uncovered_aspects.filter(
+    (gap) => gap.closable_by === "tool",
+  );
+
   return (
     <section className="card catalog-panel" aria-labelledby="unlock-heading">
       <div className="eyebrow">PROGRESSIVE ENHANCEMENT</div>
@@ -132,10 +156,21 @@ function UnlockPanel({ catalog }: { catalog: Catalog }) {
         {catalog.uncovered_capabilities.length === 0 && catalog.uncovered_aspects.length === 0
           ? "所有能力都有来源且覆盖完整，零配置即可完整规划。继续接入只会让结果更准、更贴近实时。"
           : `当前有 ${catalog.uncovered_capabilities.length} 项能力完全没有来源，${
-              catalog.uncovered_aspects.length
-            } 项只覆盖了一部分（${catalog.uncovered_aspects
+              sourceClosableAspects.length
+            } 项只覆盖了一部分（${sourceClosableAspects
               .map((gap) => `${gap.capability_label}·${gap.label}`)
               .join("、")}）。其余由免费数据源覆盖。`}
+        {/* A part only a code change could serve is counted separately, and named.
+            Folding it into the sentence above would put it under "接上什么会更好", which is
+            a promise the reader cannot act on: no source supplies it. */}
+        {toolOnlyAspects.length > 0 && (
+          <>
+            {" "}
+            另有 {toolOnlyAspects.length} 项这个工具本身还不支持（
+            {toolOnlyAspects.map((gap) => gap.label).join("、")}
+            ），接入任何来源都不会改变，需要先改工具。
+          </>
+        )}
       </p>
 
       {/* The gaps nothing can fill, named and explained.
@@ -434,19 +469,26 @@ function ProviderCard({
             // existence), or fill a part nothing serves (a real gap), or be the
             // only source for a capability nothing has.
             const state =
-              claim.missingAspectLabels.length > 0
+              claim.closableAspectLabels.length > 0
                 ? "gap"
                 : claim.coveredElsewhere
                   ? "held"
                   : "open";
+            // A part this source lists but that only a code change could serve is never
+            // offered as something to configure. It is named so the reader knows the tool
+            // cannot plan it, and credited to no source — because none is the fix.
             const suffix =
               state === "gap"
-                ? `（可补：${claim.missingAspectLabels.join("、")}）`
+                ? `（可补：${claim.closableAspectLabels.join("、")}）`
                 : state === "held"
                   ? "（已有来源）"
                   : planned
                     ? "（待实现）"
                     : "（缺失）";
+            const toolOnlyNote =
+              claim.toolOnlyAspectLabels.length > 0
+                ? `；${claim.toolOnlyAspectLabels.join("、")}这个工具本身还不支持，接入来源也无效`
+                : "";
             return (
               <span
                 key={claim.capability}
@@ -455,7 +497,7 @@ function ProviderCard({
                 }
                 title={
                   state === "gap"
-                    ? `该能力已有来源，但这个来源尚缺的${claim.missingAspectLabels.join("、")}它可补齐`
+                    ? `该能力已有来源，但这个来源尚缺的${claim.closableAspectLabels.join("、")}它可补齐${toolOnlyNote}`
                     : state === "held"
                       ? "已有其他来源提供该能力"
                       : planned

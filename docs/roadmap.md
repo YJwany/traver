@@ -283,6 +283,27 @@
   公交路线、行程仍可规划、矩阵报 `transit: covered=False`，并且行程里确实带着上面那条解释
   （`scripts/probe_transit_without_key.py`）
 
+### 已完成的第 5 步之二：把「缺失」这一个词拆开
+
+同一类缺陷的第三例：**骑行**。能力矩阵把骑行和公交地铁渲染成同一个词「缺失」，解锁提示甚至写成
+「可补：公交/地铁、骑行」——仿佛接一个来源就能补上骑行。补不上：`TravelMode` 没有骑行成员，规划器
+不会请求它，所以接入任何来源都不会出现骑行路线。高德确实能算骑行路线，FOSSGIS 也有真实的 `bike`
+profile——**正因为数据真的存在，这个错误特别像对的**。矩阵回答的是「这个工具能不能规划它」，不是
+「服务器能不能算它」。
+
+- 每个 aspect 现在带 `requestable`（事实：有没有请求能表达它）与 `closable_by`（建议：该接来源还是
+  该改工具），全部由服务端判定，客户端不再自己推断
+- 界面据此后分开呈现：公交地铁是红色「（缺失）」，骑行是中性色虚边的「（工具不支持）」，并且面板
+  标题下那句话把它们分开计数——「另有 N 项这个工具本身还不支持」
+- 解锁提示只列 `source` 那一类。「接入后才会提供 X」后面跟一个接不出来的 X 就是假承诺
+- 新增 `ASPECT_TRAVEL_MODES`：aspect 词汇（`driving`/`walking`）与 `TravelMode` 成员
+  （`drive`/`walk`）是同一件事的两个名字，而**在这张表存在之前代码里没有任何地方说明谁对应谁**，
+  所以「某个 aspect 没有生产者」在结构上无法被发现——这正是公交地铁那个缺陷没被发现的原因。注意
+  名称相似度检查会失败（`driving` ≠ `drive`），所以对应关系必须声明而不是推断
+- `scripts/probe_reachable_aspects.py` 用这张表全面检查（aspect 的两种去向、映射是否指向真实成员、
+  每个 `TravelMode` 成员是否都能从某个请求复现），`tests/unit/test_provider_catalog.py` 把不变式
+  钉进测试
+
 **已完成的多源交叉验证**
 
 设计细节见 [`docs/architecture/cross-source-validation.md`](architecture/cross-source-validation.md)。要点：

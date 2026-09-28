@@ -61,6 +61,27 @@ export type AspectRow = {
   label: string;
   covered: boolean;
   providers: string[];
+  /**
+   * Who can close this gap: `"source"` if supplying a credential or a new source would,
+   * `"tool"` if only a change to this program would.
+   *
+   * Optional so a client built against this version keeps working with an older API. When
+   * absent the gap is treated as source-closable, which is the conservative reading: it
+   * matches what every aspect but cycling actually is, and it never invents a limitation
+   * the server did not state.
+   */
+  closable_by?: "source" | "tool";
+  /** Why the gap exists, when the server chose to explain it. */
+  note?: string;
+  /**
+   * Whether any request can name this aspect at all.
+   *
+   * The mechanical form of `closable_by === "tool"`, exposed separately because it is the
+   * fact and `closable_by` is the advice: an aspect can be requestable and still uncovered
+   * (公交/地铁 without a key), but an unrequestable one is uncovered no matter what is
+   * configured. Optional for the same backward-compatibility reason.
+   */
+  requestable?: boolean;
 };
 
 export type CapabilityRow = {
@@ -84,6 +105,11 @@ export type UncoveredAspect = {
   capability_label: string;
   aspect: string;
   label: string;
+  /** See `AspectRow.closable_by`. Optional for the same backward-compatibility reason. */
+  closable_by?: "source" | "tool";
+  note?: string;
+  /** See `AspectRow.requestable`. */
+  requestable?: boolean;
 };
 
 export type VaultStatus = {
@@ -123,6 +149,12 @@ export type CapabilityGap = {
   capability: string;
   label: string;
   note: string;
+  /**
+   * Who can close it. Always `"source"` for a whole capability: if any entry served it,
+   * its manifest would say so and it would be reported as unlockable instead of as a gap.
+   * Present anyway so the two gap kinds share a shape and a client can treat them alike.
+   */
+  closable_by?: "source" | "tool";
 };
 
 /** Which credential names are set for this caller, and where each came from. */
@@ -255,6 +287,18 @@ export type CapabilityClaim = {
   missingAspects: string[];
   /** The labels of those parts, for display. */
   missingAspectLabels: string[];
+  /**
+   * The subset of `missingAspects` that this source would actually close.
+   *
+   * Kept apart from `missingAspects` because they are not the same promise. 公交/地铁 is
+   * missing today and 高德 closes it — "可补". Cycling is missing today and **nothing**
+   * closes it, because the tool has no way to request a bike route; listing it under the
+   * same word tells someone to go and find a data source for a gap that only a code change
+   * can close, and the search cannot succeed.
+   */
+  closableAspectLabels: string[];
+  /** Labeled parts this source lists that only a change to the tool could ever serve. */
+  toolOnlyAspectLabels: string[];
 };
 
 /**
@@ -265,6 +309,10 @@ export type CapabilityClaim = {
  * lists `calculate_routes` while driving already works is not "already covered";
  * it is the fix for 公交/地铁, and saying "already covered" would bury the single
  * most useful thing the UI can tell a user planning a trip in China.
+ *
+ * The split between `closableAspectLabels` and `toolOnlyAspectLabels` comes from the
+ * server's own `closable_by` on each aspect, so the distinction is stated once, where the
+ * routing modes are defined, rather than re-derived per component.
  */
 export function capabilityClaims(
   entry: ProviderEntry,
@@ -279,6 +327,8 @@ export function capabilityClaims(
     const missing = (row?.aspects ?? []).filter(
       (aspect) => !aspect.covered && (served ? served.includes(aspect.aspect) : true),
     );
+    const closable = missing.filter((aspect) => aspect.closable_by !== "tool");
+    const toolOnly = missing.filter((aspect) => aspect.closable_by === "tool");
     return {
       capability,
       label: row?.label ?? capability,
@@ -286,6 +336,8 @@ export function capabilityClaims(
       coveredElsewhere: row?.covered === true,
       missingAspects: missing.map((aspect) => aspect.aspect),
       missingAspectLabels: missing.map((aspect) => aspect.label),
+      closableAspectLabels: closable.map((aspect) => aspect.label),
+      toolOnlyAspectLabels: toolOnly.map((aspect) => aspect.label),
     };
   });
 }
@@ -308,6 +360,11 @@ export type UnlockHint = {
  *
  * Split by whether the fix is available today: "fill in a key" is actionable,
  * "wait for the code" is not, and merging them would waste the user's time.
+ *
+ * A gap no source can close is therefore excluded from `unlocks` rather than listed
+ * hopefully. Cycling is the case: no manifest claims it and no credential would add it,
+ * because the tool has no way to request a bike route. Putting it in a source's unlock
+ * list would send the reader looking for something that does not exist.
  */
 export function unlockHints(catalog: Catalog): {
   configurable: UnlockHint[];
@@ -326,10 +383,11 @@ export function unlockHints(catalog: Catalog): {
       const wholeCapabilityMissing = uncovered.has(claim.capability) && !claim.coveredElsewhere;
       if (wholeCapabilityMissing) {
         unlocks.push(claim.label);
-      } else if (claim.missingAspectLabels.length > 0 && claim.coveredElsewhere) {
-        // Only claim the parts nothing serves; promising the whole capability
-        // would be false when another source already half-covers it.
-        unlocks.push(`${claim.label}：${claim.missingAspectLabels.join("、")}`);
+      } else if (claim.closableAspectLabels.length > 0 && claim.coveredElsewhere) {
+        // Only claim the parts nothing serves *and* that this source could actually
+        // serve. Promising the whole capability would be false when another source
+        // already half-covers it, and promising a tool-only part would be false outright.
+        unlocks.push(`${claim.label}：${claim.closableAspectLabels.join("、")}`);
       }
     }
     if (unlocks.length === 0) continue;
