@@ -12,6 +12,8 @@ import { JobProgressPanel } from "../../components/job-progress";
 import { Disagreements } from "../../components/disagreements";
 import { AgeUnknownPanel } from "../../components/freshness-coverage";
 import { ExportPanel } from "../../components/export-panel";
+import { IngestedPlacesPanel } from "../../components/ingested-places";
+import { unmatchedMentionWording, type ResolvedPlace } from "../../../lib/ingested-places";
 import { PACE_LABELS, TRAVEL_MODE_LABELS } from "../../components/plan-form";
 
 type AnyRecord = Record<string, any>;
@@ -108,7 +110,7 @@ function HolidayPanel({ holidays }: { holidays: AnyRecord | null }) {
   </div>;
 }
 
-function IngestedNotesPanel({ notes }: { notes: AnyRecord[] }) {
+function IngestedNotesPanel({ notes, places }: { notes: AnyRecord[]; places: ResolvedPlace[] | undefined }) {
   // Nothing supplied means nothing to say. An empty panel would imply the feature is
   // broken rather than unused.
   if (!notes.length) return null;
@@ -125,7 +127,10 @@ function IngestedNotesPanel({ notes }: { notes: AnyRecord[] }) {
             {note.matched
               ? <>已关联到 <strong>{note.matched_entity_name}</strong></>
               : note.kind === "place_mention"
-                ? "文中提到，但本系统没有这个地点"
+                // The sentence comes from the resolution when there is one. A bare 「本系统
+                // 没有这个地点」 was a claim about the place, and it was wrong in two of the
+                // four cases: the name may have been located, or nobody may have looked.
+                ? unmatchedMentionWording(String(note.text ?? ""), places).text
                 : "未关联到具体地点"}
           </span>
           <span className={note.kind === "warning" || note.kind === "opening_hours" ? "status-chip status-stale" : "status-chip status-estimated"}>
@@ -145,8 +150,8 @@ function IngestedNotesPanel({ notes }: { notes: AnyRecord[] }) {
       </div>)}
       <div className="entity-meta" style={{ marginTop: 10 }}>
         这些是你自己提供的内容，属于「某人说的」而不是实测值：它们只作为提示与估算参考，
-        不会覆盖高德等来源的实测路线、报价或评分。未关联到具体地点的条目，是因为文中提到的名字
-        还没有坐标，无法进入路线。
+        不会覆盖高德等来源的实测路线、报价或评分。文中提到的地点会按目的地做地名定位，
+        结果列在下面；定位到的也只是「文中提到的地点」，不会替你决定要去。
       </div>
     </div>
   </section>;
@@ -246,7 +251,11 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
     {lastResult && lastResult.warnings?.length > 0 && <div className="notice" style={{ margin: "18px 0" }}>{lastResult.warnings.join("；")}</div>}
     <StaleFactBanner facts={trip.preview?.stale_facts ?? []} />
     <AgeUnknownPanel preview={trip.preview} />
-    <IngestedNotesPanel notes={trip.preview?.ingested_notes ?? []} />
+    <IngestedNotesPanel notes={trip.preview?.ingested_notes ?? []} places={trip.preview?.ingested_places} />
+    {/* Reported after the notes, because it is about them: these are the names in your own
+        material that our sources did not have. Passing the raw field, not `?? []`, so an api
+        that does not report resolutions renders nothing instead of "we looked and found none". */}
+    <IngestedPlacesPanel places={trip.preview?.ingested_places} />
     <section className="workspace-grid"><div className="panel"><div className="panel-heading"><h2>行程 / itinerary</h2><span className="muted">{trip.itinerary?.conflicts?.length ?? 0} 个冲突</span></div><div className="panel-body">{trip.itinerary?.days?.map((day: AnyRecord) => <div className="day" key={day.id}><h3>Day {day.day_index} <span className="muted">· {day.day_date}</span></h3>{day.items.length === 0 && <div className="muted">暂无可行项目</div>}{day.items.map((item: AnyRecord) => <div className="itinerary-item" key={item.id}><div className="item-time">{formatTime(item.start_time)}</div><div><div className="item-title">{item.title}</div><div className="item-type">{typeNames[item.item_type] ?? item.item_type} · {item.visit_duration_minutes} 分钟 · 路程 {item.travel_from_previous_minutes} 分钟</div></div></div>)}</div>)}</div></div><div className="panel"><div className="panel-heading"><h2>地图 / route view</h2><span className="muted">路线由 Route Optimizer 计算</span></div><MapPanel trip={trip} /></div></section>
     <section className="lower-grid"><div className="panel"><div className="panel-heading"><h2>酒店 / offers</h2><span className="muted">{trip.preview?.hotels?.length ?? 0} 家 · {trip.preview?.hotel_offers?.length ?? 0} 个报价</span></div><div className="panel-body">{trip.preview?.hotel_offers?.length ? trip.preview.hotel_offers.slice(0, 6).map((offer: AnyRecord) => { const hotel = trip.preview.hotels.find((item: AnyRecord) => item.id === offer.hotel_id); const source = sourceFor(offer); return <div className="entity-card" key={offer.id}><div className="entity-title"><span>{hotel?.canonical_name ?? "Hotel offer"}{offer.id === trip.selected_hotel_offer_id && <span className="source-chip">已选择</span>}</span><span className="money">{formatMoney(offer.total_price)}</span></div><div className="entity-meta">{hotel?.rating ? `评分 ${hotel.rating} · ` : ""}{hotel?.location?.district ?? ""}<br />房型与取消政策保留在 Offer 层</div>{hotel && <Disagreements entity={hotel} />}<SourceChip source={source} /></div>; }) : <div className="empty">免费数据源提供酒店地理与名称事实，但不含房价与库存，因此没有报价。预算中的酒店金额是可配置的估算额度，标记为估算。</div>}</div></div>
       <div className="panel"><div className="panel-heading"><h2>美食 / restaurants</h2><span className="muted">{trip.preview?.restaurants?.length ?? 0} 家</span></div><div className="panel-body">{trip.preview?.restaurants?.slice(0, 8).map((item: AnyRecord) => { const source = sourceFor(item); return <div className="entity-card" key={item.id}><div className="entity-title"><span>{item.canonical_name}</span><span className="money">{formatMoney(item.average_cost?.value)}</span></div><div className="entity-meta">{item.cuisine?.join(" / ") || "餐厅"}{item.rating ? ` · 评分 ${item.rating}` : ""}<br />{item.location?.address}</div><Disagreements entity={item} /><SourceChip source={source} /></div>; })}</div></div>
