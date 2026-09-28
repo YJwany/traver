@@ -39,6 +39,26 @@ CAPABILITY_LABELS: dict[str, str] = {
     "enrich_attractions": "景点简介",
 }
 
+#: The parts a capability decomposes into, for capabilities where one provider
+#: serving *something* is not the same as the capability being served.
+#:
+#: Routing is the case that forced this. OSRM answers ``calculate_routes``, so a
+#: flat capability model reports routing as covered — while OSRM's public demo
+#: offers driving only, with no transit at all. The matrix then says "everything
+#: is covered" and a source that adds 公交/地铁 looks pointless, which is both
+#: false and the opposite of the truth for a domestic itinerary. A capability
+#: listed here is only "complete" when every aspect has a provider.
+#:
+#: A capability with no entry is atomic and behaves exactly as before.
+CAPABILITY_ASPECTS: dict[str, dict[str, str]] = {
+    "calculate_routes": {
+        "driving": "驾车",
+        "transit": "公交/地铁",
+        "walking": "步行",
+        "cycling": "骑行",
+    },
+}
+
 #: Canonical capability order, so the matrix renders identically every time.
 CAPABILITY_ORDER: tuple[str, ...] = tuple(CAPABILITY_LABELS)
 
@@ -83,6 +103,16 @@ class ProviderManifest:
     kind: str
     status: str
     capabilities: tuple[str, ...] = ()
+    #: For capabilities that decompose into aspects (see ``CAPABILITY_ASPECTS``),
+    #: which aspects this source actually serves. A capability served by nobody
+    #: in full is reported with its missing parts rather than as covered, because
+    #: "driving works" is not "routing works".
+    #:
+    #: Omitting an aspect is a claim that the source does not serve it. That
+    #: matters for honesty in both directions: OSRM's demo has no real walking or
+    #: cycling paths (its walking times are straight-line estimates, labelled as
+    #: such downstream), so it declares driving only rather than overstating.
+    aspects: tuple[tuple[str, tuple[str, ...]], ...] = ()
     credentials: tuple[CredentialField, ...] = ()
     #: Registry ``name`` values this manifest corresponds to, used to tell an
     #: active source from a merely declared one. Empty for sources that do not
@@ -147,9 +177,14 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         cost_note="免费、免密钥",
         freshness_note="按请求实时计算，默认缓存 10 分钟",
         docs_url="https://project-osrm.org/",
+        # Driving only. The public demo has no real walking or cycling paths, and
+        # it has no transit at all — so claiming those aspects here would make the
+        # matrix report full routing coverage that does not exist.
+        aspects=(("calculate_routes", ("driving",)),),
         caveats=(
             "公共 demo 只提供驾车路线，步行与骑行没有真实路径",
             "因此步行时长按实测直线距离推算并标注为估算",
+            "完全没有公交/地铁规划：这是它最大的能力缺口",
         ),
     ),
     ProviderManifest(
@@ -216,6 +251,7 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
             ),
         ),
         provider_names=("amap",),
+        aspects=(("calculate_routes", ("driving", "transit", "walking", "cycling")),),
         cost_note="个人认证开发者非商业用途每月有免费配额，超出后按量计费",
         freshness_note="按请求实时查询，国内 POI 与路线显著优于 OSM",
         docs_url="https://lbs.amap.com/",
@@ -307,6 +343,49 @@ def _is_active(manifest: ProviderManifest, registered: set[str], present: set[st
     return manifest.status == STATUS_AVAILABLE
 
 
+def _active_providers_for(capability: str, registered: set[str]) -> list[str]:
+    """Implemented manifests with a live provider that serve ``capability``."""
+    active: list[str] = []
+    for manifest in PROVIDER_CATALOG:
+        if not manifest.is_usable or capability not in manifest.capabilities:
+            continue
+        if manifest.provider_names and not (set(manifest.provider_names) & registered):
+            continue
+        active.append(manifest.id)
+    return active
+
+
+def _aspect_rows(capability: str, registered: set[str]) -> list[dict]:
+    """Per-aspect coverage for a capability that decomposes.
+
+    Empty for an atomic capability, so callers can treat "no aspects" and "not
+    decomposable" identically and the flat capabilities keep their old shape.
+    """
+    declared = CAPABILITY_ASPECTS.get(capability)
+    if not declared:
+        return []
+    rows: list[dict] = []
+    for aspect, label in declared.items():
+        providers: list[str] = []
+        for manifest in PROVIDER_CATALOG:
+            if not manifest.is_usable or capability not in manifest.capabilities:
+                continue
+            if manifest.provider_names and not (set(manifest.provider_names) & registered):
+                continue
+            served = dict(manifest.aspects).get(capability, ())
+            if aspect in served:
+                providers.append(manifest.id)
+        rows.append(
+            {
+                "aspect": aspect,
+                "label": label,
+                "covered": bool(providers),
+                "providers": providers,
+            }
+        )
+    return rows
+
+
 def capability_matrix(registered_names: Iterable[str]) -> list[dict]:
     """Which capabilities are reachable, and what would unlock the rest.
 
@@ -314,26 +393,56 @@ def capability_matrix(registered_names: Iterable[str]) -> list[dict]:
     running registry. A capability counts as covered only when an *implemented*
     manifest that serves it also has a provider registered — so this reports what
     the process can do now, not what the catalogue mentions.
+
+    For a capability that decomposes (``CAPABILITY_ASPECTS``), ``covered`` means
+    *at least one* aspect is served and ``complete`` means all of them are. The
+    two are reported separately, and a partially served capability carries its
+    missing parts in ``missing_aspects``, because "驾车可用" must not be presented
+    as "路线规划没问题".
     """
     registered = set(registered_names)
     matrix: list[dict] = []
     for capability in CAPABILITY_ORDER:
-        active: list[str] = []
-        for manifest in PROVIDER_CATALOG:
-            if not manifest.is_usable or capability not in manifest.capabilities:
-                continue
-            if manifest.provider_names and not (set(manifest.provider_names) & registered):
-                continue
-            active.append(manifest.id)
+        active = _active_providers_for(capability, registered)
+        aspects = _aspect_rows(capability, registered)
+        missing = [row["aspect"] for row in aspects if not row["covered"]]
         matrix.append(
             {
                 "capability": capability,
                 "label": CAPABILITY_LABELS[capability],
                 "covered": bool(active),
+                # An atomic capability is complete when it is covered.
+                "complete": bool(active) and not missing,
+                "aspects": aspects,
+                "missing_aspects": missing,
                 "providers": active,
             }
         )
     return matrix
+
+
+def uncovered_aspects(registered_names: Iterable[str]) -> list[dict]:
+    """Parts of a covered capability that nothing serves.
+
+    Separate from ``uncovered_capabilities`` on purpose. A missing capability means
+    the feature is absent; a missing aspect means the feature works for some
+    journeys and silently not for others — which is worse, because nothing in the
+    UI would otherwise hint at it. A trip that needs 公交/地铁 would just be
+    planned as if driving were the only option.
+    """
+    gaps: list[dict] = []
+    for row in capability_matrix(registered_names):
+        for aspect in row["aspects"]:
+            if not aspect["covered"]:
+                gaps.append(
+                    {
+                        "capability": row["capability"],
+                        "capability_label": row["label"],
+                        "aspect": aspect["aspect"],
+                        "label": aspect["label"],
+                    }
+                )
+    return gaps
 
 
 def catalog_as_dicts(
@@ -359,6 +468,10 @@ def catalog_as_dicts(
                 "kind": manifest.kind,
                 "status": manifest.status,
                 "capabilities": list(manifest.capabilities),
+                # Which parts of a decomposable capability this source serves, so
+                # the UI can say what an inactive source would actually add
+                # instead of only that it mentions a capability.
+                "aspects": {capability: list(served) for capability, served in manifest.aspects},
                 "cost_note": manifest.cost_note,
                 "freshness_note": manifest.freshness_note,
                 "docs_url": manifest.docs_url,

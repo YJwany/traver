@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { ApiKeySettings } from "../components/api-key-settings";
+import { ProviderCatalog } from "../components/provider-catalog";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
@@ -14,15 +15,23 @@ type Health = {
   database: string;
   environment?: string;
   database_error?: string;
+  credential_vault?: string;
+  credential_key_source?: string;
 };
 
 /**
  * Settings / diagnostics.
  *
- * Also surfaces the API's readiness report, because the single most common
- * setup failure is a mismatch between the browser's configuration and the
- * server's auth mode. Showing `authentication` from the API itself makes that
- * mismatch visible instead of leaving the user staring at a 401.
+ * Two things live here, in this order because it is the order they matter in:
+ *
+ *   1. **What this deployment can do.** Traver ships no data and binds to no
+ *      model, so the catalogue is the real answer to "is this set up". It is
+ *      generated from the server's provider manifests, so adding a source makes
+ *      it appear without touching the Web app.
+ *   2. **Connection diagnostics.** The most common setup failure is a mismatch
+ *      between the browser's configuration and the server's auth mode. Showing
+ *      `authentication` from the API itself makes that visible instead of leaving
+ *      the user staring at a 401.
  *
  * The API URL is displayed because a build-time `NEXT_PUBLIC_API_URL` mistake is
  * invisible otherwise.
@@ -63,6 +72,8 @@ export default function SettingsPage() {
 
       <ApiKeySettings apiUrl={API_URL} />
 
+      <ProviderCatalog apiUrl={API_URL} />
+
       <section className="card" style={{ marginTop: 18, padding: 22 }}>
         <div className="eyebrow">API / STATUS</div>
         <h2 style={{ margin: "6px 0 14px" }}>服务端状态</h2>
@@ -94,6 +105,14 @@ export default function SettingsPage() {
             {health.environment && (
               <div className="entity-meta">
                 环境：<code>{health.environment}</code>
+              </div>
+            )}
+            {health.credential_vault && (
+              <div className="entity-meta">
+                凭据保险箱：<strong>{health.credential_vault}</strong>
+                {health.credential_key_source && health.credential_key_source !== "unavailable"
+                  ? `（主密钥来源：${health.credential_key_source === "env" ? "环境变量" : "密钥文件"}）`
+                  : "（无可用主密钥，暂时无法保存凭据）"}
               </div>
             )}
             {health.database_error && (

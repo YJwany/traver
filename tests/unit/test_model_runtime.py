@@ -188,6 +188,32 @@ def test_two_owners_get_their_own_models(runtime):
     assert model_runtime.resolve(OWNER).adapter.api_key == f"sk-{OWNER}"
 
 
+def test_one_owners_model_does_not_become_anothers(runtime):
+    """The asymmetric case, which is the one that would leak.
+
+    Both owners having a model proves nothing about isolation — a lookup that
+    ignored the owner would still return *a* model for each. What matters is that
+    configuring one owner leaves the other unconfigured, because an unset owner
+    silently spending someone else's quota is the failure mode that matters.
+
+    ``resolve`` never returns ``None``; an unconfigured owner resolves to
+    ``source == "none"`` with no adapter, so that pair is what is asserted.
+    """
+    model_runtime, vault = runtime
+    vault.store(OWNER, MODEL_PROVIDER_ID, KEY_BASE_URL, "https://example.invalid/v1")
+    vault.store(OWNER, MODEL_PROVIDER_ID, KEY_API_KEY, f"sk-{OWNER}")
+
+    assert model_runtime.resolve(OWNER).adapter is not None
+
+    other = model_runtime.resolve("owner-b")
+    assert other.adapter is None, "owner B must not inherit owner A's model"
+    assert other.source == "none"
+    assert other.sources == {}
+    # And the credential is not even visible to the other owner.
+    assert vault.reveal("owner-b", MODEL_PROVIDER_ID, KEY_API_KEY) is None
+    assert vault.configured_keys("owner-b", MODEL_PROVIDER_ID) == set()
+
+
 def test_a_change_takes_effect_without_a_restart(runtime):
     """The reason there is no cache: saving a key must work on the next message."""
     model_runtime, vault = runtime

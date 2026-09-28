@@ -17,7 +17,12 @@ from travel_api.domain.models import (
     TripRevisionResult,
 )
 from travel_api.providers.free import attributions_as_dicts
-from travel_api.providers.manifest import capability_matrix, catalog_as_dicts, manifest_for
+from travel_api.providers.manifest import (
+    capability_matrix,
+    catalog_as_dicts,
+    manifest_for,
+    uncovered_aspects,
+)
 from travel_api.services.auth import Principal
 from travel_api.services.credentials import (
     SOURCE_ENV,
@@ -135,6 +140,11 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
 
     ``planned`` sources (currently 高德/AMap) appear in the catalogue but are
     deliberately excluded from the matrix, because nothing implements them yet.
+
+    ``uncovered_aspects`` is reported separately from ``uncovered_capabilities``.
+    A missing capability is a visible absence; a missing *aspect* means a feature
+    works for some journeys and silently not for others — routing without 公交/地铁
+    being the case that matters, since a flat "routing: covered" would hide it.
     """
     settings = request.app.state.settings
     registry = request.app.state.provider_registry
@@ -148,6 +158,7 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
         "capabilities": matrix,
         "registered": sorted(name for name in registered if name),
         "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
+        "uncovered_aspects": uncovered_aspects(registered),
         "vault": _vault_status(request, settings),
     }
 

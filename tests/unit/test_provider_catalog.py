@@ -17,6 +17,7 @@ from travel_api.main import create_app
 from travel_api.providers.base import CAPABILITY_BY_METHOD
 from travel_api.providers.free import build_free_providers
 from travel_api.providers.manifest import (
+    CAPABILITY_ASPECTS,
     PROVIDER_CATALOG,
     STATUS_AVAILABLE,
     STATUS_NEEDS_CREDENTIALS,
@@ -24,6 +25,7 @@ from travel_api.providers.manifest import (
     capability_matrix,
     catalog_as_dicts,
     manifest_for,
+    uncovered_aspects,
     unknown_capabilities,
 )
 
@@ -125,6 +127,105 @@ def test_the_real_free_stack_covers_the_core_capabilities():
         "enrich_attractions",
     ):
         assert matrix[capability] is True, f"{capability} should work with no credentials"
+
+
+# -- partial coverage must not be reported as full -------------------------
+#
+# Routing is why this exists. OSRM answers ``calculate_routes``, so a flat model
+# reports routing as covered — while the public demo has no transit at all. The
+# matrix would then say everything is covered and a source that adds 公交/地铁 would
+# look pointless, which is the opposite of true for a domestic itinerary.
+
+
+def test_osrm_is_not_credited_with_transit_routing():
+    """The demo cannot plan 公交/地铁, so it must not be recorded as doing so.
+
+    Asserted against the provider's own declared aspects and the resulting matrix,
+    because the tempting mistake — listing every aspect the capability name
+    implies — is exactly what would make the matrix self-flattering.
+    """
+    osrm = manifest_for("osrm")
+    assert osrm is not None
+    served = dict(osrm.aspects).get("calculate_routes", ())
+    assert served == ("driving",), f"OSRM declares {served}, which overstates the demo"
+
+    matrix = {row["capability"]: row for row in capability_matrix(_free_stack_names())}
+    aspect_rows = {row["aspect"]: row for row in matrix["calculate_routes"]["aspects"]}
+    assert aspect_rows["driving"]["covered"] is True
+    assert aspect_rows["transit"]["covered"] is False
+    assert aspect_rows["transit"]["providers"] == []
+
+
+def test_a_capability_with_a_missing_aspect_is_covered_but_not_complete():
+    """Two different facts, reported separately so neither hides the other.
+
+    ``covered`` is what the deployment can do today; ``complete`` is whether it can
+    do all of it. Collapsing them either hides the transit gap or denies that
+    driving works.
+    """
+    row = next(
+        item
+        for item in capability_matrix(_free_stack_names())
+        if item["capability"] == "calculate_routes"
+    )
+    assert row["covered"] is True, "driving works, so routing is not absent"
+    assert row["complete"] is False, "transit is missing, so routing is not complete"
+    assert set(row["missing_aspects"]) == {"transit", "walking", "cycling"}
+
+
+def test_uncovered_aspects_names_the_gap_and_what_it_belongs_to():
+    gaps = uncovered_aspects(_free_stack_names())
+    by_aspect = {gap["aspect"]: gap for gap in gaps}
+    assert "transit" in by_aspect
+    assert by_aspect["transit"]["label"] == "公交/地铁"
+    assert by_aspect["transit"]["capability_label"] == "路线规划"
+    # Driving is served, so it must not be reported as a gap.
+    assert "driving" not in by_aspect
+
+
+def test_an_atomic_capability_reports_no_aspects():
+    """Capabilities that do not decompose keep working exactly as before."""
+    row = next(
+        item
+        for item in capability_matrix(_free_stack_names())
+        if item["capability"] == "search_hotels"
+    )
+    assert row["aspects"] == []
+    assert row["missing_aspects"] == []
+    assert row["complete"] is True
+
+
+def test_every_declared_aspect_belongs_to_a_declared_capability():
+    """An aspect under a capability nobody declares is dead configuration."""
+    for manifest in PROVIDER_CATALOG:
+        for capability, served in manifest.aspects:
+            assert capability in manifest.capabilities, (
+                f"{manifest.id} declares aspects for {capability}, which it does not serve"
+            )
+            known = CAPABILITY_ASPECTS.get(capability)
+            assert known is not None, (
+                f"{manifest.id} declares aspects for {capability}, which has no aspect list"
+            )
+            unknown = set(served) - set(known)
+            assert not unknown, f"{manifest.id} declares unknown aspects of {capability}: {unknown}"
+
+
+def test_a_manifest_that_decomposes_declares_at_least_one_aspect():
+    """Omitting ``aspects`` means "serves none", which would be a silent retraction.
+
+    A source that lists a decomposable capability but no aspects would be counted
+    as covering it while contributing nothing to any part of it — so it must
+    either name what it serves or be caught here.
+    """
+    for manifest in PROVIDER_CATALOG:
+        if not manifest.is_usable:
+            continue
+        declared = dict(manifest.aspects)
+        for capability in manifest.capabilities:
+            if capability in CAPABILITY_ASPECTS:
+                assert declared.get(capability), (
+                    f"{manifest.id} serves {capability}, which decomposes, but names no aspects"
+                )
 
 
 # -- serialisation ---------------------------------------------------------

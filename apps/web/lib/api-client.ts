@@ -53,7 +53,7 @@ export class ApiError extends Error {
 }
 
 type RequestOptions = {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
   /** Extra query parameters; `undefined`/`null` values are omitted. */
   params?: Record<string, string | number | undefined | null>;
