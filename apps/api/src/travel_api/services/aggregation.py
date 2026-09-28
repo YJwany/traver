@@ -230,10 +230,16 @@ def _collect(results: list[ProviderResult], expected_type: type) -> list:
 #: What would actually close the gap, per mode. A single generic sentence is not
 #: actionable: telling someone who asked to walk that 公交/地铁 needs a 高德 key points them
 #: at the wrong remedy, and the free routing tier already covers walking and driving.
+#:
+#: "profile" is spelled out as 「路线类型」 rather than left as the OSRM term. This sentence is
+#: read by a traveller, not by an integrator: OSRM's ``profile`` is the parameter that selects
+#: the walking/driving network, and a bare English word in the middle of a Chinese sentence
+#: reads as an unfinished translation. ``tests/unit/test_user_facing_prose.py`` checks this
+#: property for all server-written prose, because the leak is invisible to every other test.
 _TRAVEL_MODE_REMEDIES: dict[str, str] = {
-    TravelMode.WALK.value: "免费路线源（OSRM）的步行 profile 可以算，通常是网络或限流问题",
-    TravelMode.DRIVE.value: "免费路线源（OSRM）的驾车 profile 可以算，通常是网络或限流问题",
-    TravelMode.TAXI.value: "免费路线源（OSRM）的驾车 profile 可以算，通常是网络或限流问题",
+    TravelMode.WALK.value: "免费路线源（OSRM）的步行路线类型可以算，通常是网络或限流问题",
+    TravelMode.DRIVE.value: "免费路线源（OSRM）的驾车路线类型可以算，通常是网络或限流问题",
+    TravelMode.TAXI.value: "免费路线源（OSRM）的驾车路线类型可以算，通常是网络或限流问题",
     TravelMode.TRANSIT.value: "接入高德 Web 服务 Key（公交/地铁是免费源完全没有的能力）",
 }
 

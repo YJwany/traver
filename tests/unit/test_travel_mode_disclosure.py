@@ -3,7 +3,7 @@
 Choosing 公交 / 地铁 with no 高德 key is a supported path, not an error: the free OSRM
 providers decline transit rather than substituting a car time, and the itinerary's travel
 times become distance-based estimates. Those estimates are already disclosed — as a count,
-"N leg(s) use distance-based travel estimates".
+how many legs were derived.
 
 The count is not enough. It does not connect the fallback to the request that caused it, so
 a traveller who explicitly picked 公交/地铁 sees estimated minutes with no explanation, and

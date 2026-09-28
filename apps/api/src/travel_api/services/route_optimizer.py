@@ -171,10 +171,11 @@ class RouteOptimizer:
         for attraction in attraction_queue:
             conflicts.append(f"{attraction.canonical_name}: {_leftover_reason(attraction, days)}")
         if estimated_legs:
-            # Disclose derived travel times rather than presenting them as measured.
-            conflicts.append(
-                f"{estimated_legs} leg(s) use distance-based travel estimates, not measured routes"
-            )
+            # Disclose derived travel times rather than presenting them as measured. Written in
+            # Chinese because the server's own prose is Chinese everywhere else — this line
+            # reaches the user directly, and it was showing up untranslated in the middle of an
+            # otherwise Chinese exported itinerary.
+            conflicts.append(f"{estimated_legs} 段路程按距离估算，不是实测路线")
         return Itinerary(days=days, conflicts=conflicts)
 
     def _next_open_attraction(

@@ -105,7 +105,12 @@ def test_travel_time_is_derived_from_distance_not_a_constant():
     # 1.9 km at 4.5 km/h.
     assert item.travel_from_previous_minutes == 26
     assert item.travel_from_previous_minutes != 21  # the old constant
-    assert any("distance-based travel estimates" in conflict for conflict in itinerary.conflicts)
+    # The disclosure has to say both things: how many legs, and that they are not measured.
+    # Asserting only on "估算" would pass on a sentence that never says the times are derived.
+    assert any(
+        "1 段路程按距离估算" in conflict and "不是实测路线" in conflict
+        for conflict in itinerary.conflicts
+    )
 
 
 def test_travel_speed_follows_pace():
