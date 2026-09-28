@@ -100,7 +100,29 @@ export type Catalog = {
   registered: string[];
   uncovered_capabilities: string[];
   uncovered_aspects: UncoveredAspect[];
+  /**
+   * Uncovered capabilities no catalogue entry can unlock, each with why and what would.
+   *
+   * Optional so a client built against this version can still talk to an older API without
+   * crashing the settings page. When it is absent the panel simply does not render; the
+   * count in `uncovered_capabilities` is still shown, so nothing is claimed that is false —
+   * only less is explained.
+   */
+  capability_gaps?: CapabilityGap[];
   vault: VaultStatus;
+};
+
+/**
+ * A capability nothing in the catalogue can serve, with the reason.
+ *
+ * Distinct from `uncovered_capabilities` for the same reason the server keeps them apart:
+ * "nobody serves this" and "you have not configured it yet" have opposite remedies, and a
+ * bare list of ids cannot tell them apart.
+ */
+export type CapabilityGap = {
+  capability: string;
+  label: string;
+  note: string;
 };
 
 /** Which credential names are set for this caller, and where each came from. */

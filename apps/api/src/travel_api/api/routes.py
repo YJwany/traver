@@ -20,6 +20,7 @@ from travel_api.domain.models import (
 from travel_api.providers.free import attributions_as_dicts
 from travel_api.providers.manifest import (
     CAPABILITY_ORDER,
+    capability_gaps,
     capability_matrix,
     catalog_as_dicts,
     manifest_for,
@@ -162,8 +163,13 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
     # declares as soon as any one of its providers is registered — which is how a
     # source whose routing provider failed to register could still be reported as
     # covering 公交/地铁.
+    #
+    # ``serving_providers_for`` rather than ``providers_for``: a provider that implements a
+    # method by always returning nothing is dispatched to but is not coverage. Asking the
+    # structural question here reported 房型与报价 as fully covered by OpenStreetMap in a
+    # deployment where no source can produce a room rate at all.
     live_providers = {
-        provider: {getattr(item, "name", "") for item in registry.providers_for(provider)}
+        provider: {getattr(item, "name", "") for item in registry.serving_providers_for(provider)}
         for provider in CAPABILITY_ORDER
     }
     configured = _credentials_configured(principal.owner_id, request)
@@ -176,6 +182,11 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
         "registered": sorted(name for name in registered if name),
         "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
         "uncovered_aspects": uncovered_aspects(registered, live_providers),
+        # Named, with the reason, and only for gaps no catalogue entry can unlock. A bare
+        # count leaves the reader to work out which capability is absent and what would fix
+        # it, which is the opposite of useful in a tool whose premise is that you plug in
+        # whatever you need.
+        "capability_gaps": capability_gaps(registered, live_providers),
         "vault": _vault_status(request, settings),
     }
 

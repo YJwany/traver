@@ -118,6 +118,8 @@ function UnlockPanel({ catalog }: { catalog: Catalog }) {
   const hints = unlockHints(catalog);
   const model = modelEntry(catalog);
   const modelReady = hasModel(catalog);
+  // Tolerated as absent so a client built against this version can still read an older API.
+  const gaps = catalog.capability_gaps ?? [];
 
   return (
     <section className="card catalog-panel" aria-labelledby="unlock-heading">
@@ -135,6 +137,22 @@ function UnlockPanel({ catalog }: { catalog: Catalog }) {
               .map((gap) => `${gap.capability_label}·${gap.label}`)
               .join("、")}）。其余由免费数据源覆盖。`}
       </p>
+
+      {/* The gaps nothing can fill, named and explained.
+          A count alone would leave the reader to find which capability is absent and what
+          would fix it — the opposite of useful in a tool whose premise is that you plug in
+          whatever you need. This is also where a bare "1 项能力完全没有来源" stops being
+          misleading: it is one specific thing, and here is why. */}
+      {gaps.length > 0 && (
+        <ul className="note-list" style={{ marginBottom: 14 }}>
+          {gaps.map((gap) => (
+            <li key={gap.capability} className="vault-note vault-note-warn">
+              <strong>{gap.label}</strong>：没有任何已接入的来源能提供它。
+              {gap.note ? ` ${gap.note}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="unlock-grid">
         <div className="unlock-block">

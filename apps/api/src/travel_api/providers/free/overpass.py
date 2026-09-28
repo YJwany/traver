@@ -383,6 +383,14 @@ class OverpassPoiProvider:
             provider=self.name, data=hotels, source_references=[reference] if hotels else []
         )
 
+    #: Declared so the capability matrix reports room offers as uncovered rather than as
+    #: fully served by this source. The method below must exist — one provider serves
+    #: hotels, restaurants and attractions together — but returning an empty list is the
+    #: whole of its behaviour, and "returns nothing" is not coverage. Without this, the
+    #: settings page advertised room rates as available in a deployment where no source
+    #: can produce one.
+    UNSERVED_CAPABILITIES = frozenset({"search_room_offers"})
+
     async def search_room_offers(
         self, hotel_ids: list[str], profile: TripProfile
     ) -> ProviderResult:

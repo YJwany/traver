@@ -75,6 +75,7 @@ function catalog(overrides: Partial<Catalog> = {}): Catalog {
     registered: ["openstreetmap"],
     uncovered_capabilities: [],
     uncovered_aspects: [],
+    capability_gaps: [],
     vault: vault(),
     ...overrides,
   };

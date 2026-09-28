@@ -152,9 +152,15 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         label="OpenStreetMap / Overpass",
         kind="data",
         status=STATUS_AVAILABLE,
+        # ``search_room_offers`` is deliberately absent. It used to be listed, and the
+        # effect was that the capability matrix reported 房型与报价 as fully covered by this
+        # source — in a deployment where no source at all can produce a room rate. The
+        # provider still implements the method (it must, to share one dataset across
+        # hotels, restaurants and attractions) and still returns an empty success, which is
+        # the honest answer. Implementing it was mistaken for serving it, which is exactly
+        # the kind of unearned claim this catalogue exists to prevent.
         capabilities=(
             "search_hotels",
-            "search_room_offers",
             "search_restaurants",
             "search_attractions",
         ),
@@ -494,6 +500,59 @@ def capability_matrix(
             }
         )
     return matrix
+
+
+#: Why a capability nothing can serve is missing, and what would fill it.
+#:
+#: A nameless gap is not actionable. The catalogue used to report only a *count* of
+#: uncovered capabilities, so a deployment where room rates were unavailable said "1 项能力
+#: 完全没有来源" and left the reader to find which one by diffing the matrix against their
+#: expectations. Since the whole premise of this tool is "plug in what you need", the
+#: useful statement is which capability is missing and which kind of source provides it.
+#:
+#: Only capabilities that *no* catalogue entry serves belong here. If some source could
+#: unlock it, the unlock hint already says so and a note would be redundant — worse, it
+#: would read as if nothing could, which is the opposite of the truth.
+CAPABILITY_GAP_NOTES: dict[str, str] = {
+    "search_room_offers": (
+        "房型与实时房价只存在于商业酒店渠道（携程 / Booking / Expedia 的开放接口，或高德的酒店开放平台），"
+        "本工具尚未接入任何一家。因此预算里的住宿部分是估算额度，并已标注为估算——"
+        "它不会拿一个编造的房价冒充实时报价。"
+    ),
+}
+
+
+def capability_gaps(
+    registered_names: Iterable[str],
+    live_providers: Mapping[str, set[str]] | None = None,
+) -> list[dict]:
+    """Uncovered capabilities that no catalogue entry can unlock, with the reason.
+
+    Kept separate from ``uncovered_capabilities`` (a bare list of ids) so existing callers
+    keep working, and so a client can tell "nobody serves this" apart from "you have not
+    configured it yet" — two situations with opposite remedies.
+    """
+    matrix = capability_matrix(registered_names, live_providers)
+    # Anything an inactive-but-implemented source declares is unlockable by credentials, so
+    # it is excluded here and reported through the unlock hints instead.
+    unlockable = {
+        capability
+        for entry in PROVIDER_CATALOG
+        if entry.status in {STATUS_AVAILABLE, STATUS_NEEDS_CREDENTIALS}
+        for capability in entry.capabilities
+    }
+    gaps: list[dict] = []
+    for row in matrix:
+        if row["covered"] or row["capability"] in unlockable:
+            continue
+        gaps.append(
+            {
+                "capability": row["capability"],
+                "label": row["label"],
+                "note": CAPABILITY_GAP_NOTES.get(row["capability"], ""),
+            }
+        )
+    return gaps
 
 
 def uncovered_aspects(

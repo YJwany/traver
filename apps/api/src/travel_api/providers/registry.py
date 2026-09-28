@@ -5,7 +5,11 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from travel_api.domain.models import ProviderHealth
-from travel_api.providers.base import CAPABILITY_BY_METHOD, HealthProvider
+from travel_api.providers.base import (
+    CAPABILITY_BY_METHOD,
+    HealthProvider,
+    unserved_capabilities_of,
+)
 from travel_api.providers.resilience import ProviderCallPolicy, ProviderRuntime
 
 logger = logging.getLogger(__name__)
@@ -119,6 +123,11 @@ class ProviderRegistry:
     def providers_for(self, method: str) -> list[Any]:
         """Providers able to serve `method`, in registration order.
 
+        Structural: a provider qualifies by implementing the method's protocol. This is what
+        dispatch uses, and it must stay permissive — a source with no room rates still has to
+        be asked for room rates, because returning an empty success is how it declines
+        honestly and how the request shows up in the provider audit.
+
         Unknown methods fall back to every provider so custom capabilities keep
         working without a registry change.
         """
@@ -127,6 +136,25 @@ class ProviderRegistry:
         if capability is None:
             return providers
         return [provider for provider in providers if isinstance(provider, capability)]
+
+    def serving_providers_for(self, method: str) -> list[Any]:
+        """Providers that declare they actually provide data for `method`.
+
+        The distinction from :meth:`providers_for` is the point. Dispatch asks "who can be
+        called", and a stub that always returns an empty list qualifies. *Reporting* asks
+        "who will answer", and that stub must not.
+
+        Conflating the two is not hypothetical: the capability matrix credited OpenStreetMap
+        with fully covering room offers, because it implements ``search_room_offers``, while
+        its own caveat said OSM has no rates. A deployment with no source that can produce a
+        room rate advertised that room rates were available. Use this for the catalogue and
+        anything user-facing; use :meth:`providers_for` for calling.
+        """
+        return [
+            provider
+            for provider in self.providers_for(method)
+            if method not in unserved_capabilities_of(provider)
+        ]
 
     async def call(self, provider: Any, method: str, *args):
         return await self.runtime.call(provider, method, *args)

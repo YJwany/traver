@@ -138,6 +138,36 @@ CAPABILITY_BY_METHOD: dict[str, type] = {
     "enrich_attractions": ContentProvider,
 }
 
+#: Capabilities a provider implements structurally but does not actually serve.
+#:
+#: Implementing a method is not the same as answering it. ``search_room_offers`` exists on
+#: the interface because some sources do quote rates; a source without them must still
+#: satisfy the interface, and its correct behaviour is to return an empty result rather
+#: than invent a price. That empty result is right, but it is not coverage — and nothing in
+#: ``isinstance`` can tell the two apart.
+#:
+#: Left undeclared, the capability matrix counted Overpass as *fully covering* room offers
+#: while its own manifest caveat said it had no rates, so the settings page advertised a
+#: capability that returns nothing. The registry now consults this set when reporting what a
+#: deployment can do, which makes "I cannot serve this" a statement a provider can make
+#: instead of one a reader has to infer from an empty list.
+#:
+#: This is for capabilities the protocol union forces a provider to carry. A source that
+#: genuinely serves a capability must never list it here — an unnecessary entry would hide
+#: real coverage, which is the same lie told in the other direction.
+UNSERVED_CAPABILITIES: frozenset[str] = frozenset()
+
+
+def unserved_capabilities_of(provider: object) -> frozenset[str]:
+    """What ``provider`` declares it cannot serve, tolerating a non-conforming value.
+
+    Read defensively so a test double or a duck-typed provider cannot break the catalogue:
+    a missing declaration means "nothing extra is unserved", which is the pre-existing
+    behaviour.
+    """
+    declared = getattr(provider, "UNSERVED_CAPABILITIES", None)
+    return declared if isinstance(declared, frozenset) else frozenset()
+
 
 class TravelProvider(
     HotelProvider,

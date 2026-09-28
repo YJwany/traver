@@ -523,12 +523,57 @@ def test_catalog_endpoint_reports_a_usable_deployment(tmp_path):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["uncovered_capabilities"] == [], (
-        "the default deployment should leave no capability uncovered"
+    # 房型与报价 is genuinely uncovered, and this assertion used to claim otherwise.
+    #
+    # The old expectation was `uncovered_capabilities == []`, which held only because
+    # Overpass implements `search_room_offers` as a method that always returns nothing and
+    # was counted as coverage. So the catalogue asserted that a deployment which cannot
+    # obtain a room rate was fully covered — the test was pinning the bug.
+    #
+    # One gap is the honest answer for this deployment: rates require a commercial hotel
+    # channel, and none is integrated. Everything else is served by keyless sources.
+    assert payload["uncovered_capabilities"] == ["search_room_offers"]
+    # And the gap is named with a reason, not just counted, so a reader learns what to plug
+    # in rather than having to diff the matrix against their expectations.
+    gap = next(
+        item for item in payload["capability_gaps"] if item["capability"] == "search_room_offers"
     )
+    assert gap["label"]
+    assert "估算" in gap["note"], "the note must say what happens instead of a real rate"
     assert "openstreetmap" in payload["registered"]
     ids = {item["id"] for item in payload["providers"]}
     assert {"openstreetmap", "amap", "openai-compatible"} <= ids
+
+
+def test_a_provider_that_always_returns_nothing_is_not_credited_with_coverage(tmp_path):
+    """The rule behind the assertion above, stated directly.
+
+    Implementing a protocol method is not the same as serving it. OpenStreetMap carries no
+    rates, so its `search_room_offers` returns an empty success — correct behaviour, because
+    inventing a price would be worse — but an empty success must not be reported as a
+    capability.
+    """
+    with _client(tmp_path) as client:
+        payload = client.get("/api/v1/providers/catalog").json()
+
+    row = next(
+        item for item in payload["capabilities"] if item["capability"] == "search_room_offers"
+    )
+    assert row["covered"] is False
+    assert row["complete"] is False
+    assert row["providers"] == []
+
+    # The same source *is* credited where it genuinely delivers, so the fix does not simply
+    # silence the provider.
+    for capability in ("search_hotels", "search_restaurants", "search_attractions"):
+        served = next(item for item in payload["capabilities"] if item["capability"] == capability)
+        assert served["covered"] is True, capability
+        assert served["providers"] == ["openstreetmap"]
+
+    # And the provider itself still declares the hotel capability it does serve.
+    entry = next(item for item in payload["providers"] if item["id"] == "openstreetmap")
+    assert "search_hotels" in entry["capabilities"]
+    assert "search_room_offers" not in entry["capabilities"]
 
 
 def test_catalog_endpoint_does_not_leak_a_configured_secret(tmp_path):

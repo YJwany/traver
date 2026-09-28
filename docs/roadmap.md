@@ -187,8 +187,6 @@
 
 **尚未开始**
 
-- 自动渲染的设置页与能力矩阵 UI（服务端接口已完成，Web 侧对 `needs_credentials` 状态与"
-  公交/地铁"缺口的呈现待补）
 - 高德之外的第二个真实数据源（抖音/美团/携程/同程均**无公开 API**，已走内容摄取路线）
 - 多城市、i18n（zh/en/ja）、地图与知识图谱可视化、导出（图片/PDF/日历）、偏好记忆、
   多源交叉验证
@@ -196,6 +194,29 @@
   （需要高德 Key，且必须与实测 POI 明确区分开来）
 - 作业注册表在进程内：多 worker 部署需要共享存储（已在 `planning-jobs.md` 中写明）
 - 每个行程的重规划（`refresh`）仍走同步路径，尚未接入作业与进度
+- **房型与实时房价没有任何来源**：高德 Web 服务 API 不提供房价，其余接入的来源都是地理/天气类。
+  要补上需要接一个商业酒店渠道，尚未做。矩阵现在如实报为 `NONE` 并说明原因
+
+**已完成的第 3 步：能力矩阵的诚实性修复**
+
+设计细节见 [`docs/architecture/capability-coverage.md`](architecture/capability-coverage.md)。要点：
+
+- 修掉一个真实的多报：Overpass 必须实现 `search_room_offers`（一个 provider 同时服务酒店/餐厅/景点），
+  实现方式是**永远返回空**。注册表用 `isinstance` 判断，分不出「真的会给数据」和「永远返回空」，
+  于是矩阵报告 `[FULL] search_room_offers providers=['openstreetmap']`——而这个部署里没有任何来源
+  能产生一个房价，同一份 manifest 的注意事项还写着「不含房价」
+- 一条断言在保护这个 bug：`assert payload["uncovered_capabilities"] == []`。测试通过只是因为
+  空桩被算作了覆盖。已改为断言真实状态
+- 修法是三层的，因为任何一层单独都可能错：provider 声明 `UNSERVED_CAPABILITIES`；
+  注册表拆出 `serving_providers_for()`（报告用）与 `providers_for()`（分发用，桩必须继续被调用，
+  它靠返回空来拒绝，而「问过没有」和「没问过」是两件事）；manifest 不再声明拿不出的能力
+- 缺口现在**带原因**（`capability_gaps`），而不是只报一个计数——产品前提是「需要什么自己接」，
+  所以「缺什么、要接什么」才是可用信息
+- 「没人能提供」与「你还没配置」分开：公交地铁属于后者（高德能提供，只差 Key），
+  把可解的缺口标成死局等于让用户放弃一个 Key 就能解决的事
+- 缺口说明断言了行为（「住宿部分是估算额度并已标注」），所以它被验证：无报价 → `is_estimate=True`
+  / 480 元；有真实报价 → `is_estimate=False / status=observed` / 且引用来源。两个方向都钉住，
+  因为一个永远为 `True` 的标记不携带信息
 
 **已完成的第 7 步之一：异步任务与进度推送**
 

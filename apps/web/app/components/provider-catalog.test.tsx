@@ -147,7 +147,17 @@ const CATALOG: Catalog = {
     },
   ],
   registered: ["openstreetmap", "osrm"],
-  uncovered_capabilities: [],
+  // Room rates are genuinely uncovered: no keyless source can produce one, and no
+  // catalogue entry claims to. The fixture mirrors the real API so the render path is
+  // exercised rather than assumed.
+  uncovered_capabilities: ["search_room_offers"],
+  capability_gaps: [
+    {
+      capability: "search_room_offers",
+      label: "房型与报价",
+      note: "房型与实时房价只存在于商业酒店渠道（携程 / Booking 的开放接口），本工具尚未接入任何一家。因此预算里的住宿部分是估算额度。",
+    },
+  ],
   uncovered_aspects: [
     {
       capability: "calculate_routes",
@@ -221,6 +231,46 @@ describe("ProviderCatalog", () => {
     // otherwise.
     expect(screen.getByText("2 / 3 完整可用")).toBeInTheDocument();
     expect(screen.getByText(/另有 1 项只覆盖了一部分/)).toBeInTheDocument();
+  });
+
+  it("names and explains a capability nothing can serve", async () => {
+    // Two defects are guarded here.
+    //
+    // First, the count: the panel used to say "1 项能力完全没有来源" without saying which,
+    // leaving the reader to diff the matrix against their expectations.
+    //
+    // Second, and worse, the server used to report room rates as *fully covered by
+    // OpenStreetMap*, because Overpass implements `search_room_offers` as a method that
+    // always returns an empty list. A catalogue must not advertise a capability that
+    // returns nothing, so the gap has to appear at all.
+    stubFetch(CATALOG);
+    render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    expect(await screen.findByText("房型与报价", { selector: "strong" })).toBeInTheDocument();
+    // And it says what happens instead, so the reader connects it to the estimated
+    // accommodation line in the budget rather than hunting for a bug.
+    expect(screen.getByText(/没有任何已接入的来源能提供它/)).toBeInTheDocument();
+    expect(screen.getByText(/估算额度/)).toBeInTheDocument();
+  });
+
+  it("does not show a gap panel when there is nothing missing", async () => {
+    // An empty panel would imply a broken feature rather than an absent one.
+    stubFetch({ ...CATALOG, uncovered_capabilities: [], capability_gaps: [] });
+    render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    expect(await screen.findByText("酒店搜索")).toBeInTheDocument();
+    expect(screen.queryByText(/没有任何已接入的来源能提供它/)).not.toBeInTheDocument();
+  });
+
+  it("survives an API that predates the gap report", async () => {
+    // `capability_gaps` is optional so a client can talk to an older API. The count is
+    // still truthful in that case — only less is explained — so this must not throw.
+    const { capability_gaps: _dropped, ...withoutGaps } = CATALOG;
+    stubFetch(withoutGaps);
+    render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    expect(await screen.findByText(/1 项能力完全没有来源/)).toBeInTheDocument();
+    expect(screen.queryByText(/没有任何已接入的来源能提供它/)).not.toBeInTheDocument();
   });
 
   it("names the missing parts of a partially covered capability", async () => {
