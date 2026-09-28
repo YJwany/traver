@@ -65,6 +65,8 @@
 - 可靠性：HTTP 层指数退避重试、镜像回退、按能力隔离的熔断、非 `HealthProvider` 状态为 `unknown`
 - 默认免费源开启、mock 源关闭，避免合成数据混入真实结果
 - 204 个离线测试 + 8 个可选的真实网络端到端测试（含直接验证 Nominatim 的用例）
+- **路线按 profile 分服务器登记（后续修正）**：默认改指 FOSSGIS，步行由推算升级为实测；详见
+  [architecture/routing.md](architecture/routing.md)
 
 详见 [providers/free-sources.md](providers/free-sources.md)。
 
@@ -91,7 +93,11 @@
 
 ## Phase 5 — Real Providers / Production Data
 
-- 自建 OSRM 实例以支持真实步行/骑行路径（公共 demo 只提供驾车路径）
+- ~~自建 OSRM 实例以支持真实步行/骑行路径（公共 demo 只提供驾车路径）~~ → **已用 FOSSGIS 达成步行部分**：
+  默认指向 `routing.openstreetmap.de`，步行变为实测（20/20 腿，4.4–4.6 km/h）。骑行仍未达成，
+  因为 `TravelMode` 没有 `bike` 成员——服务器支持不等于工具能规划，见
+  [architecture/routing.md](architecture/routing.md)。自建实例仍可通过 `OSRM_BASE_URL` +
+  `OSRM_HONOURED_PROFILES` 接入
 - 高德/天气与正式授权商业 Provider（房价、库存、评分）
 - 面向出站调用的商业来源凭据轮换、配额与数据用途审查
   （入站认证与限流见 Phase 6；这里指的是**调用第三方**时的凭据与合规治理）

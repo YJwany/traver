@@ -17,6 +17,7 @@ from travel_api.domain.models import (
     TripRevisionRequest,
     TripRevisionResult,
 )
+from travel_api.providers.base import unserved_aspects_of
 from travel_api.providers.free import attributions_as_dicts
 from travel_api.providers.manifest import (
     CAPABILITY_ORDER,
@@ -172,21 +173,37 @@ async def provider_catalog(request: Request, principal: Principal = Depends(get_
         provider: {getattr(item, "name", "") for item in registry.serving_providers_for(provider)}
         for provider in CAPABILITY_ORDER
     }
+    # Which parts of a decomposable capability each provider says it cannot serve.
+    #
+    # A manifest's ``aspects`` is static and so must hold for every configuration a user
+    # might choose, which is impossible when the answer depends on which server they pointed
+    # the provider at — OSRM routes pedestrians from a real foot profile on FOSSGIS, and can
+    # only derive their duration on a car-only server. The provider knows which it is, so it
+    # gets the last word; the manifest carries the default claim and the provider narrows it.
+    unserved_aspects = {
+        getattr(item, "name", ""): {
+            capability: unserved_aspects_of(item, capability)
+            for capability in CAPABILITY_ORDER
+            if unserved_aspects_of(item, capability)
+        }
+        for provider in CAPABILITY_ORDER
+        for item in registry.serving_providers_for(provider)
+    }
     configured = _credentials_configured(principal.owner_id, request)
 
     catalog = catalog_as_dicts(registered, configured_credentials=configured)
-    matrix = capability_matrix(registered, live_providers)
+    matrix = capability_matrix(registered, live_providers, unserved_aspects)
     return {
         "providers": catalog,
         "capabilities": matrix,
         "registered": sorted(name for name in registered if name),
         "uncovered_capabilities": [row["capability"] for row in matrix if not row["covered"]],
-        "uncovered_aspects": uncovered_aspects(registered, live_providers),
+        "uncovered_aspects": uncovered_aspects(registered, live_providers, unserved_aspects),
         # Named, with the reason, and only for gaps no catalogue entry can unlock. A bare
         # count leaves the reader to work out which capability is absent and what would fix
         # it, which is the opposite of useful in a tool whose premise is that you plug in
         # whatever you need.
-        "capability_gaps": capability_gaps(registered, live_providers),
+        "capability_gaps": capability_gaps(registered, live_providers, unserved_aspects),
         "vault": _vault_status(request, settings),
     }
 

@@ -29,7 +29,10 @@ DEFAULT_USER_AGENT = "TraverTravelPlanner/0.1 (+https://example.invalid/traver)"
 #: Minimum seconds between two requests to the same host. These are compliance
 #: values, not performance tuning:
 #:   * Nominatim's usage policy allows an absolute maximum of 1 request/second.
-#:   * The OSRM demo server (FOSSGIS) says "do not exceed 1 request per second".
+#:   * FOSSGIS, which runs the routing server used by default, says "do not exceed 1
+#:     request per second". Listed explicitly rather than left to ``FALLBACK_HOST_INTERVAL``:
+#:     a licence constraint should not depend on a default that someone may retune.
+#:   * The OSRM demo server publishes the same 1 request/second limit.
 #:   * Open-Meteo's free tier allows 600/minute, so a small gap is ample.
 #:   * Wikimedia asks bots to make requests serially, never in parallel.
 DEFAULT_HOST_INTERVALS: dict[str, float] = {
@@ -37,6 +40,7 @@ DEFAULT_HOST_INTERVALS: dict[str, float] = {
     "overpass-api.de": 1.0,
     "overpass.private.coffee": 1.0,
     "maps.mail.ru": 1.0,
+    "routing.openstreetmap.de": 1.0,
     "router.project-osrm.org": 1.0,
     "api.open-meteo.com": 0.2,
     "air-quality-api.open-meteo.com": 0.2,

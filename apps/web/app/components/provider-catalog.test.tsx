@@ -137,11 +137,14 @@ const CATALOG: Catalog = {
       covered: true,
       complete: false,
       providers: ["osrm"],
-      missing_aspects: ["transit", "walking", "cycling"],
+      // 步行 covered, because the default routing deployment has a real foot profile and a
+      // car-only one still yields a flagged walking leg. The two that remain missing are the
+      // two no OSRM can do: no timetable data (公交/地铁) and no cycling mode in TravelMode.
+      missing_aspects: ["transit", "cycling"],
       aspects: [
         { aspect: "driving", label: "驾车", covered: true, providers: ["osrm"] },
         { aspect: "transit", label: "公交/地铁", covered: false, providers: [] },
-        { aspect: "walking", label: "步行", covered: false, providers: [] },
+        { aspect: "walking", label: "步行", covered: true, providers: ["osrm"] },
         { aspect: "cycling", label: "骑行", covered: false, providers: [] },
       ],
     },
@@ -164,12 +167,6 @@ const CATALOG: Catalog = {
       capability_label: "路线规划",
       aspect: "transit",
       label: "公交/地铁",
-    },
-    {
-      capability: "calculate_routes",
-      capability_label: "路线规划",
-      aspect: "walking",
-      label: "步行",
     },
     {
       capability: "calculate_routes",
@@ -285,7 +282,11 @@ describe("ProviderCatalog", () => {
 
     expect(scope.getByText("驾车")).toBeInTheDocument();
     expect(scope.getByText("公交/地铁（缺失）")).toBeInTheDocument();
-    expect(scope.getByText("步行（缺失）")).toBeInTheDocument();
+    expect(scope.getByText("骑行（缺失）")).toBeInTheDocument();
+    // 步行 is served now, so it must NOT be marked missing — reporting a part as absent when
+    // it works is the same error as the reverse, told the other way round.
+    expect(scope.queryByText("步行（缺失）")).toBeNull();
+    expect(scope.getByText("步行")).toBeInTheDocument();
     // The provider that does serve driving is still credited with it.
     expect(scope.getByText("osrm")).toBeInTheDocument();
   });
@@ -296,9 +297,9 @@ describe("ProviderCatalog", () => {
     render(<ProviderCatalog apiUrl="http://api.test" />);
 
     // The unlock hint names the specific missing parts rather than the whole
-    // capability, since driving already works.
+    // capability, since driving and walking already work.
     expect(
-      await screen.findByText(/接入后才会提供路线规划：公交\/地铁、步行、骑行/),
+      await screen.findByText(/接入后才会提供路线规划：公交\/地铁、骑行/),
     ).toBeInTheDocument();
     // And it is still labelled as unimplemented while being offered.
     expect(screen.getAllByText(/尚未实现/).length).toBeGreaterThan(0);
@@ -327,7 +328,7 @@ describe("ProviderCatalog", () => {
 
     // "可补" and not "缺失": 高德 can close the transit gap once it exists, so the
     // card must show it as the fix rather than as a capability nothing serves.
-    expect(scope.getByText("路线规划（可补：公交/地铁、步行、骑行）")).toBeInTheDocument();
+    expect(scope.getByText("路线规划（可补：公交/地铁、骑行）")).toBeInTheDocument();
     expect(scope.queryByText("路线规划（缺失）")).toBeNull();
   });
 

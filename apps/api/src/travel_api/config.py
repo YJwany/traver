@@ -82,7 +82,20 @@ class Settings(BaseSettings):
         "https://overpass.private.coffee/api/interpreter,"
         "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
     )
+    #: Routing server to use. Empty means the built-in default (FOSSGIS, which has real
+    #: foot and bike profiles worldwide). Point it at the OSRM demo server
+    #: (https://router.project-osrm.org) or a self-hosted instance to change that.
     osrm_base_url: str = ""
+    #: Comma-separated routing profiles the configured server honours, for a self-hosted
+    #: deployment.
+    #:
+    #: Only needed when pointing ``osrm_base_url`` somewhere unrecognised. An unknown host is
+    #: treated as **car-only**, because a routing server that lacks the profile you ask for
+    #: does not fail — the OSRM demo answers a foot request with car durations and HTTP 200.
+    #: Assuming a pedestrian profile we cannot verify is how a driving time ends up in a
+    #: walking leg, so the pessimistic default applies and an operator who knows their server
+    #: supports more can say so. Recognised values: ``driving``, ``foot``, ``bike``.
+    osrm_honoured_profiles: str = ""
 
     # -- AMap / 高德 ------------------------------------------------------
     #: Whether owners may plug in an AMap key. Off means the catalogue still lists

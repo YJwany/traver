@@ -142,6 +142,7 @@ def create_app(
                 bbox_radius_degrees=app_settings.free_provider_bbox_radius_degrees,
                 overpass_mirrors=app_settings.overpass_mirror_list(),
                 osrm_base_url=app_settings.osrm_base_url or None,
+                osrm_honoured_profiles=app_settings.osrm_honoured_profiles or None,
                 poi_ttl_seconds=app_settings.free_provider_poi_ttl_seconds,
                 weather_ttl_seconds=app_settings.free_provider_weather_ttl_seconds,
                 retry_count=app_settings.free_provider_retry_count,

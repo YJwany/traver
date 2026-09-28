@@ -11,7 +11,7 @@
 | 地理编码（兜底） | Nominatim | `nominatim.openstreetmap.org/search` | ODbL 1.0 © OpenStreetMap contributors |
 | 天气 | Open-Meteo Forecast | `api.open-meteo.com/v1/forecast` | CC BY 4.0 © Open-Meteo |
 | 空气质量 / 紫外线 | Open-Meteo Air Quality | `air-quality-api.open-meteo.com/v1/air-quality` | CC BY 4.0 © Open-Meteo |
-| 路线 | OSRM demo（FOSSGIS） | `router.project-osrm.org` | ODbL 1.0 © OpenStreetMap contributors |
+| 路线 | OSRM @ FOSSGIS（默认，含真实步行/骑行 profile） | `routing.openstreetmap.de` | ODbL 1.0 © OpenStreetMap contributors |
 | 景点简介 | 中文维基百科 / Wikidata | `zh.wikipedia.org/w/api.php`、`www.wikidata.org/w/api.php` | CC BY-SA 4.0（维基百科）/ CC0（Wikidata） |
 | 公共节假日 | `holidays` 库（本地数据） | 无网络请求 | MIT |
 
@@ -111,7 +111,8 @@ Overpass 镜像按顺序尝试：
 | 主机 | 最小请求间隔 | 依据 |
 |---|---|---|
 | `nominatim.openstreetmap.org` | 1.1 s | Nominatim 使用政策：绝对上限 1 次/秒 |
-| `router.project-osrm.org` | 1.0 s | FOSSGIS：不得超过 1 次/秒 |
+| `routing.openstreetmap.de` | 1.0 s | FOSSGIS 使用政策：不得超过 1 次/秒 |
+| `router.project-osrm.org` | 1.0 s | OSRM demo 同样要求不超过 1 次/秒 |
 | `overpass-api.de` 及其镜像 | 1.0 s | Overpass 常规使用上限约 < 100 次/天 |
 | `api.open-meteo.com` | 0.2 s | 免费额度 600 次/分钟 |
 | `air-quality-api.open-meteo.com` | 0.2 s | 同上 |
@@ -174,9 +175,9 @@ OSM 是地理事实来源，不含房价、库存、评分、人均消费。因�
 
 数值解析 `_parse_decimal()` 会**保留前导符号**。此前它直接跳过非数字字符，`-1` 会被解析成 `1`：畸形的星级会变成合法星级，负数金额会变成正数价格。现在负值一律被拒绝，末尾的 `amount >= 0` 判断才真正可达。
 
-### 2. 公共 OSRM demo 只提供驾车路径
+### 2. 服务器不会因为做不到而报错：按 profile 分辨部署
 
-这是最容易出错的地方。实测结果（成都两个相距约 4.8 km 的点）：
+这是最容易出错的地方。公共 OSRM demo 对任意 profile 名都返回同一个驾车结果。实测（成都两个相距约 4.8 km 的点）：
 
 ```
 foot       200 distance=4818m duration=426.6s -> 40.7 km/h
@@ -187,16 +188,35 @@ bike       200 distance=4818m duration=426.6s -> 40.7 km/h
 bicycle    200 distance=4818m duration=426.6s -> 40.7 km/h
 ```
 
-`foot`、`walking`、`bike` 等任意 profile 名都**静默返回完全相同的驾车结果**，而不是报错。如果直接采信，行程里会出现"步行 7.8 km 仅需 9 分钟"这种物理上不可能的安排。
+`foot`、`walking`、`bike` 等任意 profile 名都**静默返回完全相同的驾车结果**，而不是报错。如果直接采信，行程里会出现「步行 7.8 km 仅需 9 分钟」这种物理上不可能的安排。
+
+**但这不是 OSRM 的普遍性质，只是 demo 这台服务器的性质。** FOSSGIS 运营的 `routing.openstreetmap.de` 有真实的全球步行与骑行 profile，实测同一段路（西湖 → 灵隐寺）：
+
+```
+FOSSGIS  foot     8386 m   6708 s   4.5 km/h
+FOSSGIS  bike     8723 m   1866 s  16.8 km/h
+FOSSGIS  driving  9479 m    706 s  48.3 km/h
+demo     foot     9479 m    706 s  48.3 km/h   <- 驾车结果，改了个标签
+```
+
+`foot` 的距离与 `driving` **不同**，因为行人走的是另一套路网——这个差异才是 profile 为真的证据。
+
+因此 Traver 不再假设「OSRM 只有驾车」，而是**按部署登记它真正支持的 profile**，并默认使用 FOSSGIS：
+
+| 部署 | 登记的 profile | 步行时长的来源 |
+| --- | --- | --- |
+| `routing.openstreetmap.de`（默认） | driving, bike, foot | **实测**（`osrm_foot_profile`） |
+| `router.project-osrm.org` | driving | 路网距离 + 按 1.25 m/s 推算（`derived_walk_speed`） |
+| 其他（未登记） | driving | 同上，直到用 `OSRM_HONOURED_PROFILES` 声明 |
 
 处理方式：
 
-- 始终用服务器真正实现的 profile（`driving`）取路径。
-- 驾车模式：采用实测距离与时长。
-- 步行模式：保留实测**道路距离**，但按明确步速（`WALKING_SPEED_METERS_PER_SECOND = 1.25`，约 4.5 km/h）推算时长，并设 `is_estimate=True`。
-- 在 `SourceReference.request_context` 中记录 `duration_source` 与 `walking_speed_mps`，把限制写进数据本身，而不只写在文档里。
+- **未登记的主机一律按「只有驾车」处理。** 猜错的代价是把驾车时长写成步行，而我们无法从外部验证自建服务的 profile。
+- 距离可以借（路网的属性；同一批街道），**时长绝不外借**（模式的属性）。所以驾车专用部署上的步行腿仍然是可用的——真实距离 + 显式推算 + `is_estimate=True`。
+- **公交/地铁直接拒绝**，不拿驾车数据顶上：公交既不按驾车路线走、距离也不同，没有可借的代理关系。这是高德不可替代的地方。
+- 在 `SourceReference.request_context` 中记录 `osrm_server`、`osrm_profile`、`duration_source`、`duration_is_measured`、`walking_speed_mps` 与路网图新鲜度，把限制写进数据本身，而不只写在文档里。
 
-要获得真实的步行路径，请自建 OSRM 实例并设置 `OSRM_BASE_URL`。
+完整理由与实测数据见 [architecture/routing.md](../architecture/routing.md)。
 
 ### 3. 公共端点会间歇性拒绝连接
 

@@ -169,6 +169,30 @@ def unserved_capabilities_of(provider: object) -> frozenset[str]:
     return declared if isinstance(declared, frozenset) else frozenset()
 
 
+def unserved_aspects_of(provider: object, capability: str) -> frozenset[str]:
+    """Aspects of ``capability`` that ``provider`` cannot serve.
+
+    ``UNSERVED_CAPABILITIES`` answers "can this provider serve this capability at all".
+    Some capabilities decompose further, and a provider can serve the whole while being
+    unable to serve one part of it: a routing server with a car graph only serves
+    ``calculate_routes`` while being unable to produce a pedestrian leg.
+
+    That is exactly the case the capability matrix exists to expose. Without a way for the
+    provider to say which parts it cannot do, the catalogue can only repeat the manifest's
+    static claim — and the claim has to hold for every possible configuration, so it ends up
+    either overstating a car-only server or understating a full one.
+
+    Like ``UNSERVED_CAPABILITIES``, this is read defensively and may only ever *reduce*
+    reported coverage. A declaration that added coverage could be used to claim an aspect a
+    provider does not serve, so the direction is enforced by the caller rather than trusted.
+    """
+    declared = getattr(provider, "UNSERVED_ASPECTS", None)
+    if not isinstance(declared, dict):
+        return frozenset()
+    aspects = declared.get(capability)
+    return aspects if isinstance(aspects, frozenset) else frozenset()
+
+
 class TravelProvider(
     HotelProvider,
     RoomOfferProvider,

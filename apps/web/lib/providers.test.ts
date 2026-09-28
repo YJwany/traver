@@ -90,11 +90,15 @@ function routingRows(): CapabilityRow[] {
       covered: true,
       complete: false,
       providers: ["osrm"],
-      missing_aspects: ["transit", "walking", "cycling"],
+      // 步行 is served: the default routing deployment has a real foot profile, and on a
+      // car-only server the provider still produces a walking leg from the measured road
+      // distance with the duration derived and flagged. Either way it is unavailable to
+      // nobody. 公交/地铁 and 骑行 are what is actually missing.
+      missing_aspects: ["transit", "cycling"],
       aspects: [
         { aspect: "driving", label: "驾车", covered: true, providers: ["osrm"] },
         { aspect: "transit", label: "公交/地铁", covered: false, providers: [] },
-        { aspect: "walking", label: "步行", covered: false, providers: [] },
+        { aspect: "walking", label: "步行", covered: true, providers: ["osrm"] },
         { aspect: "cycling", label: "骑行", covered: false, providers: [] },
       ],
     }),
@@ -173,10 +177,10 @@ describe("capabilityClaims", () => {
     const claims = capabilityClaims(amap, routingRows());
 
     expect(claims).toHaveLength(1);
-    // coveredElsewhere is true — driving does work — but the missing parts are
+    // coveredElsewhere is true — driving and walking already work — but the missing parts are
     // named, which is what stops "已有来源" from burying 公交/地铁.
     expect(claims[0].coveredElsewhere).toBe(true);
-    expect(claims[0].missingAspectLabels).toEqual(["公交/地铁", "步行", "骑行"]);
+    expect(claims[0].missingAspectLabels).toEqual(["公交/地铁", "骑行"]);
   });
 
   it("claims only the parts nothing serves, not the whole capability", () => {

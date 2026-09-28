@@ -89,6 +89,7 @@ def build_free_providers(
     bbox_radius_degrees: float = 0.045,
     overpass_mirrors: list[str] | None = None,
     osrm_base_url: str | None = None,
+    osrm_honoured_profiles: str | None = None,
     poi_ttl_seconds: int = 3600,
     weather_ttl_seconds: int = 900,
     retry_count: int = 3,
@@ -151,6 +152,7 @@ def build_free_providers(
         OsmRoutingProvider(
             http=http,
             **({"base_url": osrm_base_url} if osrm_base_url else {}),
+            **({"honoured_profiles": osrm_honoured_profiles} if osrm_honoured_profiles else {}),
             timeout_seconds=timeout_seconds,
         ),
         OpenMeteoWeatherProvider(

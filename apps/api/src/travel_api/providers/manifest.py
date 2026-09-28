@@ -176,22 +176,26 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
     ),
     ProviderManifest(
         id="osrm",
-        label="OSRM 路线（公共 demo）",
+        label="OSRM 路线（默认 FOSSGIS）",
         kind="data",
         status=STATUS_AVAILABLE,
         capabilities=("calculate_routes",),
         provider_names=("osrm",),
         cost_note="免费、免密钥",
-        freshness_note="按请求实时计算，默认缓存 10 分钟",
-        docs_url="https://project-osrm.org/",
-        # Driving only. The public demo has no real walking or cycling paths, and
-        # it has no transit at all — so claiming those aspects here would make the
-        # matrix report full routing coverage that does not exist.
-        aspects=(("calculate_routes", ("driving",)),),
+        freshness_note="按请求实时计算；OSM 路网图约每两天重建一次，默认缓存 10 分钟",
+        docs_url="https://routing.openstreetmap.de/about.html",
+        # 驾车与步行。步行在 FOSSGIS 上是**实测**（真实 foot profile，4.5 km/h 量级，
+        # 与驾车路线距离不同即证据）；在只有驾车图的部署上退化为「实测路网距离 + 按步行
+        # 速度推算时长」，并把该腿标注为估算。两条路都能给出可用结果，所以步行算已覆盖；
+        # 具体是实测还是推算由每条腿的 is_estimate 与 request_context 说明。
+        #
+        # 公交/地铁与骑行不在这里，provider 的 UNSERVED_ASPECTS 也会独立地给出同样的结论。
+        aspects=(("calculate_routes", ("driving", "walking")),),
         caveats=(
-            "公共 demo 只提供驾车路线，步行与骑行没有真实路径",
-            "因此步行时长按实测直线距离推算并标注为估算",
-            "完全没有公交/地铁规划：这是它最大的能力缺口",
+            "完全没有公交/地铁规划：OSRM 不含班次数据，这是它最大的能力缺口",
+            "默认指向 FOSSGIS（有真实步行 profile）；公共 demo 只有驾车，步行时长只能推算",
+            "若把 osrm_base_url 指向自建服务，请用 osrm_honoured_profiles 声明它支持的 profile，"
+            "否则按「只有驾车」处理",
         ),
     ),
     ProviderManifest(
@@ -422,10 +426,44 @@ def _active_providers_for(
     return active
 
 
+def _provider_declines_aspect(
+    manifest: "ProviderManifest",
+    capability: str,
+    aspect: str,
+    live: Mapping[str, set[str]] | None,
+    unserved_aspects: "Mapping[str, Mapping[str, frozenset[str]]] | None",
+) -> bool:
+    """Whether every live provider of this manifest declares it cannot serve ``aspect``.
+
+    A manifest's ``aspects`` is a *static* claim, so it has to hold for every configuration a
+    user might pick — which is impossible when the answer depends on which server they pointed
+    the provider at. OSRM is the case: pointed at FOSSGIS it routes pedestrians from a real
+    foot profile, pointed at the demo server it can only borrow the car network's distance and
+    derive the duration.
+
+    Where the two disagree the provider wins, because the provider is the one that knows its
+    configuration. The direction is enforced here rather than trusted: this can only ever
+    *remove* an aspect, so a provider cannot declare its way into extra coverage — the same
+    rule ``UNSERVED_CAPABILITIES`` follows, and for the same reason.
+    """
+    if not unserved_aspects or not manifest.provider_names:
+        return False
+    names = [name for name in manifest.provider_names if name]
+    if live is not None:
+        registered_here = live.get(capability, set())
+        names = [name for name in names if name in registered_here]
+    if not names:
+        return False
+    return all(
+        aspect in unserved_aspects.get(name, {}).get(capability, frozenset()) for name in names
+    )
+
+
 def _aspect_rows(
     capability: str,
     registered: set[str],
     live: Mapping[str, set[str]] | None = None,
+    unserved_aspects: "Mapping[str, Mapping[str, frozenset[str]]] | None" = None,
 ) -> list[dict]:
     """Per-aspect coverage for a capability that decomposes.
 
@@ -444,8 +482,11 @@ def _aspect_rows(
             if not _serves_capability_now(manifest, capability, registered, live):
                 continue
             served = dict(manifest.aspects).get(capability, ())
-            if aspect in served:
-                providers.append(manifest.id)
+            if aspect not in served:
+                continue
+            if _provider_declines_aspect(manifest, capability, aspect, live, unserved_aspects):
+                continue
+            providers.append(manifest.id)
         rows.append(
             {
                 "aspect": aspect,
@@ -460,6 +501,7 @@ def _aspect_rows(
 def capability_matrix(
     registered_names: Iterable[str],
     live_providers: Mapping[str, set[str]] | None = None,
+    unserved_aspects: Mapping[str, Mapping[str, frozenset[str]]] | None = None,
 ) -> list[dict]:
     """Which capabilities are reachable, and what would unlock the rest.
 
@@ -475,6 +517,12 @@ def capability_matrix(
     stops a partially registered source from being credited with everything it
     declared. Callers that only have names may omit it.
 
+    ``unserved_aspects`` optionally maps a provider name to the aspects it declares it
+    cannot serve (``{provider: {capability: {aspect, ...}}}``). A manifest's ``aspects``
+    is a static claim that must hold for every configuration; a provider knows which
+    server it was actually pointed at. Where they disagree the provider wins, downward
+    only — see ``_provider_declines_aspect``.
+
     For a capability that decomposes (``CAPABILITY_ASPECTS``), ``covered`` means
     *at least one* aspect is served and ``complete`` means all of them are. The
     two are reported separately, and a partially served capability carries its
@@ -485,7 +533,7 @@ def capability_matrix(
     matrix: list[dict] = []
     for capability in CAPABILITY_ORDER:
         active = _active_providers_for(capability, registered, live_providers)
-        aspects = _aspect_rows(capability, registered, live_providers)
+        aspects = _aspect_rows(capability, registered, live_providers, unserved_aspects)
         missing = [row["aspect"] for row in aspects if not row["covered"]]
         matrix.append(
             {
@@ -525,6 +573,7 @@ CAPABILITY_GAP_NOTES: dict[str, str] = {
 def capability_gaps(
     registered_names: Iterable[str],
     live_providers: Mapping[str, set[str]] | None = None,
+    unserved_aspects: Mapping[str, Mapping[str, frozenset[str]]] | None = None,
 ) -> list[dict]:
     """Uncovered capabilities that no catalogue entry can unlock, with the reason.
 
@@ -532,7 +581,7 @@ def capability_gaps(
     keep working, and so a client can tell "nobody serves this" apart from "you have not
     configured it yet" — two situations with opposite remedies.
     """
-    matrix = capability_matrix(registered_names, live_providers)
+    matrix = capability_matrix(registered_names, live_providers, unserved_aspects)
     # Anything an inactive-but-implemented source declares is unlockable by credentials, so
     # it is excluded here and reported through the unlock hints instead.
     unlockable = {
@@ -558,6 +607,7 @@ def capability_gaps(
 def uncovered_aspects(
     registered_names: Iterable[str],
     live_providers: Mapping[str, set[str]] | None = None,
+    unserved_aspects: Mapping[str, Mapping[str, frozenset[str]]] | None = None,
 ) -> list[dict]:
     """Parts of a covered capability that nothing serves.
 
@@ -568,7 +618,7 @@ def uncovered_aspects(
     planned as if driving were the only option.
     """
     gaps: list[dict] = []
-    for row in capability_matrix(registered_names, live_providers):
+    for row in capability_matrix(registered_names, live_providers, unserved_aspects):
         for aspect in row["aspects"]:
             if not aspect["covered"]:
                 gaps.append(

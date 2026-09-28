@@ -107,9 +107,10 @@ async def test_live_free_providers_aggregate_real_data():
     # The routing matrix must contain both directions between real points.
     assert any(leg.distance_meters > 0 for leg in preview.route_legs)
 
-    # Walking speeds must be physically plausible. The public OSRM demo serves
-    # only the car profile and silently returns ~40 km/h for any profile name, so
-    # this is the assertion that catches a pedestrian leg carrying a car time.
+    # Walking speeds must be physically plausible. A routing server that lacks the profile
+    # you asked for does not fail — the OSRM demo answers a foot request with car durations
+    # and HTTP 200, i.e. ~40 km/h — so this is the assertion that catches a pedestrian leg
+    # carrying a car time, whichever server is configured.
     walking_legs = [leg for leg in preview.route_legs if leg.distance_meters > 500]
     assert walking_legs
     for leg in walking_legs:
@@ -119,8 +120,23 @@ async def test_live_free_providers_aggregate_real_data():
                 f"implausible walking speed {speed_kmh:.1f} km/h over "
                 f"{leg.distance_meters} m in {leg.duration_minutes} min"
             )
-            # A derived pedestrian time is never presented as measured.
-            assert leg.is_estimate is True
+            # The flag must agree with the disclosure, in both directions. Asserting only
+            # `is_estimate is True` would pin the behaviour of a car-only server and fail on
+            # one that genuinely measures the walk — and asserting only the speed would let a
+            # derived time be presented as a measurement.
+            context = leg.source_reference.request_context
+            measured = context["duration_is_measured"]
+            assert leg.is_estimate is (not measured), (
+                f"leg says is_estimate={leg.is_estimate} but the source reports "
+                f"duration_is_measured={measured} via {context['duration_source']}"
+            )
+            if measured:
+                # A measurement has to come from a real profile for this mode.
+                assert context["osrm_profile"] == "foot"
+                assert context["duration_source"] == "osrm_foot_profile"
+            else:
+                # A derived time must state the speed it was derived from.
+                assert context["walking_speed_mps"]
             assert leg.cost is None
         else:
             assert 5 <= speed_kmh <= 120

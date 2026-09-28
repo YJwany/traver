@@ -330,22 +330,32 @@ def test_the_real_free_stack_covers_the_core_capabilities():
 
 
 def test_osrm_is_not_credited_with_transit_routing():
-    """The demo cannot plan 公交/地铁, so it must not be recorded as doing so.
+    """No OSRM deployment can plan 公交/地铁, so it must not be recorded as doing so.
 
-    Asserted against the provider's own declared aspects and the resulting matrix,
-    because the tempting mistake — listing every aspect the capability name
-    implies — is exactly what would make the matrix self-flattering.
+    Asserted against the provider's own declared aspects and the resulting matrix, because the
+    tempting mistake — listing every aspect the capability name implies — is exactly what would
+    make the matrix self-flattering. Driving and walking are served; transit and cycling are
+    not, and the last two are the ones a reader could otherwise be misled about.
     """
     osrm = manifest_for("osrm")
     assert osrm is not None
     served = dict(osrm.aspects).get("calculate_routes", ())
-    assert served == ("driving",), f"OSRM declares {served}, which overstates the demo"
+    # Walking is served on every deployment: from a real foot profile where the server has one,
+    # and otherwise from the car network's *distance* with the duration derived and flagged.
+    # Either way a usable, honestly-labelled walking leg is produced, so it counts as covered.
+    assert set(served) == {"driving", "walking"}, (
+        f"OSRM declares {served}, which does not match what it can produce"
+    )
+    assert "transit" not in served, "no OSRM server has timetable data"
+    assert "cycling" not in served, "TravelMode cannot request a bike leg"
 
     matrix = {row["capability"]: row for row in capability_matrix(_free_stack_names())}
     aspect_rows = {row["aspect"]: row for row in matrix["calculate_routes"]["aspects"]}
     assert aspect_rows["driving"]["covered"] is True
+    assert aspect_rows["walking"]["covered"] is True
     assert aspect_rows["transit"]["covered"] is False
     assert aspect_rows["transit"]["providers"] == []
+    assert aspect_rows["cycling"]["covered"] is False
 
 
 def test_a_capability_with_a_missing_aspect_is_covered_but_not_complete():
@@ -362,7 +372,10 @@ def test_a_capability_with_a_missing_aspect_is_covered_but_not_complete():
     )
     assert row["covered"] is True, "driving works, so routing is not absent"
     assert row["complete"] is False, "transit is missing, so routing is not complete"
-    assert set(row["missing_aspects"]) == {"transit", "walking", "cycling"}
+    # Only the two nothing can serve. Walking used to be listed here, back when the only
+    # deployment available was car-only and its walking times had to be derived; it is now
+    # measured on the default deployment and no longer a gap.
+    assert set(row["missing_aspects"]) == {"transit", "cycling"}
 
 
 def test_uncovered_aspects_names_the_gap_and_what_it_belongs_to():

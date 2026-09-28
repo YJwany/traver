@@ -23,6 +23,7 @@ from travel_api.domain.models import (
     TripProfile,
     WeatherForecast,
 )
+from travel_api.providers.base import unserved_aspects_of
 from travel_api.providers.free import build_free_providers
 from travel_api.providers.free.geo import (
     SOURCE_NOMINATIM,
@@ -43,6 +44,7 @@ NO_RATE_LIMIT = {
     "overpass.private.coffee": 0.0,
     "maps.mail.ru": 0.0,
     "router.project-osrm.org": 0.0,
+    "routing.openstreetmap.de": 0.0,
     "api.open-meteo.com": 0.0,
 }
 
@@ -147,6 +149,18 @@ OSRM_TABLE_PAYLOAD = {
     "durations": [[0, 426.6], [432.9, 0]],
 }
 
+#: What a real foot profile answers with, for the same pair of points.
+#:
+#: Deliberately different from the car matrix in **both** distance and duration, because that
+#: difference is the only evidence available that a profile is genuinely a different mode
+#: rather than the car graph relabelled. 4818 m on the car network against 3900 m on the foot
+#: network is what pedestrians actually experience.
+OSRM_FOOT_TABLE_PAYLOAD = {
+    "code": "Ok",
+    "distances": [[0, 3900], [3950, 0]],
+    "durations": [[0, 3120], [3160, 0]],
+}
+
 #: Nominatim returns a bare JSON list (not an object) with string coordinates.
 NOMINATIM_PAYLOAD = [
     {
@@ -176,14 +190,37 @@ def _handler(*, overpass_fail_first_mirror: bool = False):
             return httpx.Response(200, json=OVERPASS_PAYLOAD)
         if host == "api.open-meteo.com":
             return httpx.Response(200, json=FORECAST_PAYLOAD)
+        if host == "routing.openstreetmap.de":
+            # FOSSGIS runs one instance per mode, so the path names the profile twice:
+            # /routed-foot/table/v1/foot/... A real foot profile answers with foot data.
+            if "/routed-foot/" in path:
+                return httpx.Response(200, json=OSRM_FOOT_TABLE_PAYLOAD)
+            return httpx.Response(200, json=OSRM_TABLE_PAYLOAD)
         if host == "router.project-osrm.org":
+            # The demo server's defining flaw, reproduced faithfully: any profile name under
+            # the single car instance returns the car matrix, with HTTP 200. A test that
+            # mocks this server must therefore be able to prove the provider does not believe
+            # a foot answer that is really a car answer.
             return httpx.Response(200, json=OSRM_TABLE_PAYLOAD)
         return httpx.Response(404, text=f"unexpected host {host}{path}")
 
     return handler
 
 
-def build_stack(*, overpass_fail_first_mirror: bool = False, **provider_kwargs):
+#: The two deployments, so a test states which one it is exercising instead of relying on
+#: whichever happens to be the default. The default is FOSSGIS; the demo is kept because its
+#: "foot returns car data" behaviour is the failure this provider exists to avoid, and it can
+#: only be tested against a server that behaves that way.
+CAR_ONLY_OSRM = "https://router.project-osrm.org"
+FOSSGIS_OSRM = "https://routing.openstreetmap.de"
+
+
+def build_stack(
+    *,
+    overpass_fail_first_mirror: bool = False,
+    routing_base_url: str = FOSSGIS_OSRM,
+    **provider_kwargs,
+):
     http = FreeHttpClient(
         user_agent="TraverTest/1.0",
         **NO_RETRY,
@@ -194,7 +231,7 @@ def build_stack(*, overpass_fail_first_mirror: bool = False, **provider_kwargs):
     geo = GeoResolver(http)
     poi = OverpassPoiProvider(http=http, geo_resolver=geo, **provider_kwargs)
     weather = OpenMeteoWeatherProvider(http=http, geo_resolver=geo)
-    routing = OsmRoutingProvider(http=http)
+    routing = OsmRoutingProvider(http=http, base_url=routing_base_url)
     return http, geo, poi, weather, routing
 
 
@@ -805,21 +842,24 @@ async def test_routing_builds_legs_from_the_osrm_matrix():
     assert len(legs) == 2  # both directions, no self-pair
     forward = next(leg for leg in legs if leg.origin_id == first)
     assert forward.destination_id == second
-    assert forward.distance_meters == 4818  # measured by OSRM
+    # The default deployment has a real foot profile, and 成都 is a relaxed city trip, so the
+    # leg is routed on the pedestrian network — hence the foot distance, not the car one.
+    assert forward.distance_meters == 3900
     assert forward.mode is TravelMode.WALK
     # Walking legs carry no fabricated fare.
     assert forward.cost is None
     await http.aclose()
 
 
-async def test_walking_duration_is_derived_not_taken_from_car_routing():
-    """The public OSRM demo routes cars only.
+async def test_walking_on_a_real_foot_profile_is_a_measurement_not_an_estimate():
+    """The capability gain from pointing at a deployment that has a foot profile.
 
-    Its 426.6 s figure for this 4.8 km leg is ~40 km/h. Presenting that as a walk
-    would be a fabricated fact, so the provider must derive the duration from a
-    walking speed and flag it as an estimate.
+    A walking duration taken from the pedestrian network is an observation: OSRM measured
+    how long this walk takes on the paths people actually walk. Marking it as an estimate
+    would understate the data just as surely as presenting a car time as a walk would
+    overstate it, so both directions are pinned here.
     """
-    http, _, _, _, routing = build_stack()
+    http, _, _, _, routing = build_stack(routing_base_url=FOSSGIS_OSRM)
     from uuid import uuid4
 
     first, second = uuid4(), uuid4()
@@ -830,8 +870,41 @@ async def test_walking_duration_is_derived_not_taken_from_car_routing():
     result = await routing.calculate_routes(make_profile(), points)
     forward = next(leg for leg in result.data if leg.origin_id == first)
 
-    # 4818 m at 1.25 m/s is about 64 minutes, not the 7 minutes the car
-    # profile reported.
+    # 3120 s is 52 minutes, and it is OSRM's own figure for the walk.
+    assert forward.duration_minutes == 52
+    assert forward.is_estimate is False
+    assert forward.distance_meters == 3900
+
+    context = forward.source_reference.request_context
+    assert context["osrm_profile"] == "foot"
+    assert context["duration_source"] == "osrm_foot_profile"
+    assert context["duration_is_measured"] is True
+    assert context["walking_speed_mps"] is None, (
+        "no speed constant was used, so none may be reported"
+    )
+    await http.aclose()
+
+
+async def test_walking_duration_is_derived_not_taken_from_car_routing():
+    """A car-only deployment must not have its car time presented as a walk.
+
+    The public OSRM demo answers a foot request with HTTP 200 and its car matrix — it does not
+    fail, it answers confidently with the wrong mode. Its 426.6 s figure for this leg is
+    ~40 km/h. So on this deployment the provider borrows only the *distance*, derives the
+    duration from a walking speed, and flags it.
+    """
+    http, _, _, _, routing = build_stack(routing_base_url=CAR_ONLY_OSRM)
+    from uuid import uuid4
+
+    first, second = uuid4(), uuid4()
+    points = [
+        RoutePoint(id=first, latitude=30.6558, longitude=104.0805),
+        RoutePoint(id=second, latitude=30.6495, longitude=104.0432),
+    ]
+    result = await routing.calculate_routes(make_profile(), points)
+    forward = next(leg for leg in result.data if leg.origin_id == first)
+
+    # 4818 m at 1.25 m/s is about 64 minutes, not the 7 minutes the car profile reported.
     assert forward.duration_minutes == 64
     assert forward.is_estimate is True
 
@@ -840,7 +913,34 @@ async def test_walking_duration_is_derived_not_taken_from_car_routing():
 
     reference = forward.source_reference
     assert reference.request_context["osrm_profile"] == "driving"
-    assert reference.request_context["duration_source"] == "derived_walking_speed"
+    assert reference.request_context["duration_source"] == "derived_walk_speed"
+    # The reason the duration is derived is disclosed in the datum itself.
+    assert reference.request_context["duration_is_measured"] is False
+    assert reference.request_context["walking_speed_mps"] == 1.25
+    await http.aclose()
+
+
+async def test_a_deployment_without_the_profile_is_named_in_the_provenance():
+    """Which server answered is part of the fact, not a debugging detail.
+
+    Two deployments produce different walking numbers for the same leg, so a stored plan that
+    did not record which one it came from could not be re-checked later.
+    """
+    http, _, _, _, fossgis = build_stack(routing_base_url=FOSSGIS_OSRM)
+    from uuid import uuid4
+
+    points = [
+        RoutePoint(id=uuid4(), latitude=30.6558, longitude=104.0805),
+        RoutePoint(id=uuid4(), latitude=30.6495, longitude=104.0432),
+    ]
+    result = await fossgis.calculate_routes(make_profile(), points)
+    context = result.data[0].source_reference.request_context
+    assert context["osrm_server"] == "routing.openstreetmap.de"
+    assert context["osrm_server_label"]
+    # A route is only as current as the road graph it was computed on, and this deployment
+    # rebuilds it about every two days — so the age of the graph is recorded with the route.
+    assert context["data_freshness"]
+    assert sorted(context["profiles_honoured"]) == ["bike", "driving", "foot"]
     await http.aclose()
 
 
@@ -864,12 +964,43 @@ async def test_driving_legs_use_measured_osrm_durations():
     assert forward.is_estimate is False
     assert forward.cost is not None
     assert forward.cost.is_estimate is True
-    assert forward.source_reference.request_context["duration_source"] == "osrm_car_profile"
+    assert forward.source_reference.request_context["duration_source"] == "osrm_driving_profile"
+
+
+async def test_routing_asks_for_the_profile_that_matches_the_mode():
+    """On a deployment with a foot profile, each mode must ask for its own.
+
+    The old code sent ``driving`` for every mode because that was all the demo server had.
+    That is now wrong: it would throw away the foot profile and quietly downgrade a measured
+    walk to a derived one.
+    """
+    seen: list[str] = []
+    base = _handler()
+
+    def recording_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "routing.openstreetmap.de":
+            # /routed-foot/table/v1/foot/<coords>
+            seen.append(request.url.path.split("/")[4])
+        return base(request)
+
+    http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(recording_handler))
+    routing = OsmRoutingProvider(http=http, base_url=FOSSGIS_OSRM)
+    from uuid import uuid4
+
+    from travel_api.domain.models import Pace
+
+    points = [
+        RoutePoint(id=uuid4(), latitude=30.6558, longitude=104.0805),
+        RoutePoint(id=uuid4(), latitude=30.6495, longitude=104.0432),
+    ]
+    await routing.calculate_routes(make_profile(pace=Pace.RELAXED), points)
+    await routing.calculate_routes(make_profile(pace=Pace.FULL), points)
+    assert seen == ["foot", "driving"]
     await http.aclose()
 
 
 async def test_routing_never_requests_an_unsupported_profile():
-    """Every profile name returns car data from the demo server, so it is not used."""
+    """A car-only server must never be asked for a profile it would silently mis-serve."""
     seen_profiles: list[str] = []
     base = _handler()
 
@@ -880,7 +1011,7 @@ async def test_routing_never_requests_an_unsupported_profile():
         return base(request)
 
     http = FreeHttpClient(**NO_RETRY, transport=httpx.MockTransport(recording_handler))
-    routing = OsmRoutingProvider(http=http)
+    routing = OsmRoutingProvider(http=http, base_url=CAR_ONLY_OSRM)
     from uuid import uuid4
 
     points = [
@@ -892,6 +1023,85 @@ async def test_routing_never_requests_an_unsupported_profile():
     await routing.calculate_routes(make_profile(pace=Pace.RELAXED), points)
     await routing.calculate_routes(make_profile(pace=Pace.FULL), points)
     assert seen_profiles == ["driving", "driving"]
+    await http.aclose()
+
+
+async def test_an_unknown_deployment_is_treated_as_car_only():
+    """The pessimistic default, and the reason for it.
+
+    A self-hosted OSRM may well have every profile, but we cannot verify that from here, and
+    the cost of being wrong upward is a car duration labelled as a walk. An operator who knows
+    their server supports more says so explicitly; until then walking is derived and flagged
+    rather than presented as measured.
+    """
+    http = FreeHttpClient(
+        user_agent="TraverTest/1.0",
+        **NO_RETRY,
+        transport=httpx.MockTransport(_handler()),
+    )
+    routing = OsmRoutingProvider(http=http, base_url="https://osrm.internal.example")
+    assert sorted(routing.server.prefixes) == ["driving"]
+    assert routing.serves_mode(TravelMode.WALK), "walking is still served, by distance proxy"
+    assert routing.serves_mode(TravelMode.DRIVE)
+
+    # And the operator can correct it.
+    declared = OsmRoutingProvider(
+        http=http,
+        base_url="https://osrm.internal.example",
+        honoured_profiles="driving,foot",
+    )
+    assert sorted(declared.server.prefixes) == ["driving", "foot"]
+    await http.aclose()
+
+
+async def test_transit_is_declined_rather_than_answered_with_a_car_time():
+    """No public OSRM has a transit profile, so none may answer a transit request.
+
+    The mode table used to map transit to ``driving``, which would have returned a 7-minute
+    car trip under a 公交/地铁 label. 公交/地铁 is precisely what 高德 adds, so declining here
+    is what makes the capability matrix's "公交/地铁：缺失" true.
+    """
+    http, _, _, _, routing = build_stack()
+    assert not routing.serves_mode(TravelMode.TRANSIT)
+    assert unserved_aspects_of(routing, "calculate_routes") == frozenset({"transit", "cycling"})
+    await http.aclose()
+
+
+async def test_the_provider_serves_every_aspect_it_claims_to():
+    """Claim and behaviour compared, which is what the old coverage bug lacked.
+
+    The false coverage in the catalogue existed because nothing checked a declaration against
+    what the code actually produced. This walks the mode table and asserts that every aspect
+    the provider does *not* declare unserved really does yield a leg, and that every aspect it
+    does declare unserved really is declined.
+    """
+    http, _, _, _, routing = build_stack()
+    unserved = unserved_aspects_of(routing, "calculate_routes")
+    aspect_by_mode = {
+        TravelMode.WALK: "walking",
+        TravelMode.DRIVE: "driving",
+        TravelMode.TAXI: "driving",
+        TravelMode.TRANSIT: "transit",
+    }
+    from uuid import uuid4
+
+    from travel_api.domain.models import Pace
+
+    points = [
+        RoutePoint(id=uuid4(), latitude=30.6558, longitude=104.0805),
+        RoutePoint(id=uuid4(), latitude=30.6495, longitude=104.0432),
+    ]
+    for mode, aspect in aspect_by_mode.items():
+        claimed_served = aspect not in unserved
+        assert routing.serves_mode(mode) is claimed_served, (
+            f"{mode.value} -> {aspect}: serves_mode says {routing.serves_mode(mode)} but the "
+            f"declaration says served={claimed_served}"
+        )
+
+    # Spot-check the behaviour behind the claim for the mode a city trip actually uses.
+    assert "walking" not in unserved
+    walked = await routing.calculate_routes(make_profile(pace=Pace.RELAXED), points)
+    assert walked.data, "walking is claimed as served but produced no legs"
     await http.aclose()
 
 

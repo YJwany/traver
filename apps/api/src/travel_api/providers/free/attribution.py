@@ -59,6 +59,21 @@ OSRM_ATTRIBUTION = Attribution(
     licence="ODbL 1.0 / CC BY-SA",
 )
 
+#: The deployment Traver uses by default, so its operator is credited by name.
+#:
+#: FOSSGIS e.V. (the German OpenStreetMap chapter) runs routing.openstreetmap.de and asks for
+#: the same attribution as the OSRM demo — OpenStreetMap credit plus the "fix the map" link
+#: — but naming the operator is the accurate thing to do and costs nothing. It also matters
+#: because the two servers are not interchangeable: only this one honours the foot and bike
+#: profiles, so a route computed here is a different kind of fact than one computed on the
+#: demo server, and a reader deserves to know which they got.
+FOSSGIS_ATTRIBUTION = Attribution(
+    provider="fossgis",
+    text="Routing: © OpenStreetMap contributors, OSRM，由 FOSSGIS e.V. 提供",
+    url="https://www.openstreetmap.org/fixthemap",
+    licence="ODbL 1.0 / CC BY-SA",
+)
+
 #: MIT does not require attribution, but crediting the holiday database is both
 #: good practice and useful to a reader checking where a date came from.
 HOLIDAYS_ATTRIBUTION = Attribution(
@@ -93,6 +108,7 @@ OPEN_DATA_ATTRIBUTIONS: tuple[Attribution, ...] = (
     OSM_ATTRIBUTION,
     OPEN_METEO_ATTRIBUTION,
     OSRM_ATTRIBUTION,
+    FOSSGIS_ATTRIBUTION,
     HOLIDAYS_ATTRIBUTION,
     WIKIPEDIA_ATTRIBUTION,
     AMAP_ATTRIBUTION,
