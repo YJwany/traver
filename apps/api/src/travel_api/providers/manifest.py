@@ -220,12 +220,28 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         ),
         provider_names=("openstreetmap",),
         cost_note="免费、免密钥、无需注册",
-        freshness_note="POI 随社区编辑变化，默认缓存 1 小时",
+        # Two different ages, and saying only the first would be the misleading half.
+        #
+        # The cache TTL is about *our copy*. The data's own age is per element, and the two are
+        # orders of magnitude apart: measured against the live service
+        # (`scripts/probe_osm_element_age.py`), 杭州西湖's snapshot was 1 minute old while the
+        # median element had last been edited 914 days earlier and 19 of 46 were over five years
+        # old. 成都's mirror served a snapshot already 146 days old. So a traveller reading
+        # "cached for 1 hour" learns when we looked, not how old the place listing is — and the
+        # plan may name a restaurant that closed years ago while every freshness check passes.
+        #
+        # We now request `out center meta` and report the distribution on the reference
+        # (`SourceReference.element_age`), which the freshness audit and the export both surface.
+        freshness_note=(
+            "默认缓存 1 小时；条目由社区长期编辑，逐条最后修改时间差异很大，"
+            "批次时间不代表单条记录的新旧（已按条报告，见导出「逐条数据的自身时间」）"
+        ),
         docs_url="https://wiki.openstreetmap.org/wiki/Overpass_API",
         caveats=(
             "不含房价与库存：无商业报价时预算按估算额度呈现并标注为估算",
             "国内省会级城市覆盖充足，县级与古镇类目的地依赖当地测绘贡献",
             "同一目的地只发一次合并查询，按类别分别限额",
+            "条目可能多年未更新，计划中按数据自身时间标注，请自行判断是否仍然有效",
         ),
     ),
     ProviderManifest(

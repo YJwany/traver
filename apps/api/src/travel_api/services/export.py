@@ -401,6 +401,63 @@ def _markdown_budget(trip: Trip) -> list[str]:
     return out
 
 
+def _element_age_lines(references: list[SourceReference]) -> list[str]:
+    """The sources whose own members carry ages, spelled out as a distribution.
+
+    A source like Overpass returns a *set*, and no single timestamp describes it: the snapshot
+    is when OSM cut the database, and the elements inside were last edited years apart. Measured
+    against the live service, 杭州西湖's snapshot was 1 minute old while the median element had
+    last been edited 914 days earlier and 19 of 46 were over five years old.
+
+    So the source table's 「数据自身时间」 column is true and nonetheless misleading about the
+    facts, and this section is what makes the 时效性 requirement hold for these sources. Written
+    as a sentence per source rather than a column, because the honest answer is a shape — "half
+    of these are two years old and the oldest is from 2019" is the thing a reader can act on,
+    and a single averaged number would destroy exactly that.
+    """
+    aged = [reference for reference in references if reference.element_age is not None]
+    if not aged:
+        return []
+
+    out: list[str] = ["### 逐条数据的自身时间", ""]
+    out.append(
+        "以下来源返回的是一批各自独立编辑的记录。"
+        "上表「数据自身时间」是整个批次的时间，描述的是我们拿到的这份副本，"
+        "而不是其中任何一条记录；每条记录自己的时间见下："
+    )
+    out.append("")
+    for reference in aged:
+        element_age = reference.element_age
+        assert element_age is not None  # narrowed by the filter above
+        out.append(
+            f"- `{reference.source}`（{reference.source_id}）共 {element_age.count} 条："
+            f"中位 **{element_age.median_days} 天**，"
+            f"最早一条最后修改于 **{element_age.oldest_at.date().isoformat()}**"
+            f"（{round(element_age.oldest_seconds / 86400)} 天前）；"
+            f"其中 {element_age.older_than_horizon} 条已超出该类事实可接受的 "
+            f"{_format_age(element_age.horizon_seconds)}。"
+        )
+        if element_age.any_older_than_horizon:
+            out.append(
+                "  - 超出的条目未从计划中删除，因为删除会把「可能已经过时」说成「不存在」。"
+                "它们仍作为候选列出，请按上表自行判断。"
+            )
+    if any(reference.element_age.older_than_horizon for reference in aged if reference.element_age):
+        out.append("")
+        # Deliberately *not* a claim about how old such snapshots usually are. The first draft of
+        # this sentence read 「通常只有几分钟」, from 杭州 where the snapshot really was 1 minute
+        # old — and it then printed directly beneath a row reading 「27 小时」, and 成都's mirror
+        # served a 146-day-old snapshot. The magnitude belongs to one observation, not to the
+        # source, so the sentence names the two things being distinguished and sizes neither.
+        out.append(
+            "「数据自身时间」与「逐条时间」是两件事：前者是整批数据的时刻，"
+            "后者是记录本身。对于由社区长期编辑的来源（例如 OpenStreetMap），"
+            "前者可以很新而后者仍然很久，本节的数字以后者为准。"
+        )
+    out.append("")
+    return out
+
+
 def _markdown_sources(trip: Trip) -> list[str]:
     preview = trip.preview
     if preview is None or not preview.source_references:
@@ -418,6 +475,7 @@ def _markdown_sources(trip: Trip) -> list[str]:
         "或未知，而不是数据的新旧。"
     )
     out.append("")
+    out.extend(_element_age_lines(preview.source_references))
     return out
 
 

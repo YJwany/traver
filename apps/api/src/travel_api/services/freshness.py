@@ -184,7 +184,16 @@ class FreshnessService:
                 "data_age_seconds": age,
                 "max_age_seconds": horizon,
             }
-            if not self.age_is_known(reference):
+            # Whether the age of the *data* is knowable, from either source of information.
+            #
+            # `age_is_known` asks about `observed_at` alone. A source that publishes no batch
+            # timestamp but does stamp its individual members has still told us how old the data
+            # is — just per member rather than per payload. Reporting `age_unknown` then would be
+            # false in the direction that matters: it would say "we cannot tell how old this is"
+            # about a set whose ages we can read off directly, and the finding a reader needs
+            # ("half of these were last edited years ago") would be the one withheld.
+            element_age = reference.element_age
+            if not self.age_is_known(reference) and element_age is None:
                 findings.append(
                     {
                         **common,
@@ -196,7 +205,9 @@ class FreshnessService:
                     }
                 )
                 continue
-            if age > horizon:
+            # A batch timestamp that is knowable is judged first, because it is a statement
+            # about the whole payload and is cheap to check.
+            if self.age_is_known(reference) and age > horizon:
                 findings.append(
                     {
                         **common,
@@ -211,7 +222,62 @@ class FreshnessService:
                         ),
                     }
                 )
+                continue
+            # The single timestamp passed. If the source told us its members have their own
+            # ages, judge those too — passing this point is not the same as the facts being
+            # current.
+            element_finding = self._element_age_finding(reference, common, horizon, moment)
+            if element_finding is not None:
+                findings.append(element_finding)
         return findings
+
+    @staticmethod
+    def _element_age_finding(
+        reference: SourceReference, common: dict, horizon: int, snapshot: datetime
+    ) -> dict | None:
+        """Report a set whose members are older than their own horizon.
+
+        This closes a hole the single-timestamp model cannot see. Overpass reports
+        ``osm3s.timestamp_osm_base`` — when OSM cut the database — and it is genuinely
+        provider-reported, so ``age_is_about_the_data`` is true and the check above passes. But
+        that timestamp says nothing about the elements: measured against the live service, a
+        snapshot **1 minute** old held elements whose median last edit was **914 days** earlier,
+        with 19 of 46 over five years old.
+
+        So a plan built on fresh snapshots could pass every freshness check while describing
+        restaurants that closed years ago. That is precisely the failure the 时效性 requirement
+        names — "不能是那种几年前那种" — and it was invisible because the word "fresh" was
+        being applied to the wrong object.
+
+        Reported as ``too_old`` with the distribution in the detail rather than a verdict,
+        because the honest statement is a shape, not a yes/no: half the list is two years old
+        and one entry is a decade old are different situations, and a reader deciding whether to
+        trust a restaurant needs the second number.
+        """
+        element_age = reference.element_age
+        if element_age is None or not element_age.any_older_than_horizon:
+            return None
+        # `observed_at` describes the batch; the age quoted here is about the members. Which of
+        # the two the reader is looking at is the whole point, so the sentence names both and
+        # says which one is which, including when the batch time is our own fetch time.
+        batch = (
+            f"该来源的数据自身时间（{snapshot.isoformat()}）"
+            if reference.observed_at_basis.age_is_about_the_data
+            else f"该来源未提供整批数据的时间（{snapshot.isoformat()} 是我们抓取的时刻）"
+        )
+        return {
+            **common,
+            "reason": "too_old",
+            "element_age": element_age.model_dump(mode="json"),
+            "detail": (
+                f"{batch}描述的是整批数据，但其中 "
+                f"{element_age.older_than_horizon} / {element_age.count} 条自身已超过"
+                f"该类事实可接受的 {horizon} 秒：中位 {element_age.median_days} 天、"
+                f"最早一条最后修改于 {element_age.oldest_at.date().isoformat()}"
+                f"（{round(element_age.oldest_seconds / 86400)} 天前）。"
+                "单条时间戳无法表达这种分布，因此单独列出"
+            ),
+        }
 
     def stale_facts(
         self, references: list[tuple[str, SourceReference]], *, now: datetime | None = None

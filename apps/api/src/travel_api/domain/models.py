@@ -159,6 +159,55 @@ class RevisionAction(StrEnum):
     INCREASE_FOOD_BUDGET = "increase_food_budget"
 
 
+class ElementAge(BaseModel):
+    """How old the members of a *set* of data are, when no single instant can say.
+
+    ``SourceReference.observed_at`` assumes a datum has one production time. Some sources do
+    not: an Overpass response is one snapshot of OSM elements that were last edited years
+    apart, so the only timestamp the source publishes — ``osm3s.timestamp_osm_base`` — is when
+    the *database* was cut, not when any fact in it was made.
+
+    That distinction is the whole 时效性 requirement. Measured against the live service
+    (``scripts/probe_osm_element_age.py``), 杭州西湖's snapshot was **1 minute** old while the
+    median element had last been edited **914 days** earlier and 19 of 46 were over five years
+    old. Reporting the snapshot as the data's age therefore says "this is a minute old" about
+    facts that are years old, and — because ``PROVIDER_REPORTED`` is what makes
+    ``age_is_about_the_data`` true — it also made the freshness audit pass them silently.
+
+    So the honest answer is not a different instant. It is the distribution, reported as one:
+
+    ``median_seconds`` rather than a mean, because a mean lets a small tail of ancient entries
+    hide behind a bulk of recent ones, and the tail is exactly what misleads a traveller —
+    44 current restaurants and one shut in 2011 still render as a full list.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: How many elements the statistic covers, so it cannot be read as describing the whole.
+    count: int = Field(ge=0)
+    median_seconds: int = Field(ge=0)
+    oldest_seconds: int = Field(ge=0)
+    #: The oldest element's own last-edit time, so a reader can check the arithmetic.
+    oldest_at: datetime
+    #: How many elements are older than the horizon for this kind of fact, and what that
+    #: horizon was, so the number is interpretable without the policy at hand.
+    older_than_horizon: int = Field(ge=0)
+    horizon_seconds: int = Field(gt=0)
+    #: The instant this was computed, because ages are only true as of a moment.
+    computed_at: datetime
+
+    @computed_field
+    @property
+    def median_days(self) -> float:
+        """The median age in days. Wall-clock units, because that is how a reader judges it."""
+        return round(self.median_seconds / 86400, 1)
+
+    @computed_field
+    @property
+    def any_older_than_horizon(self) -> bool:
+        return self.older_than_horizon > 0
+
+
 class SourceReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -176,6 +225,10 @@ class SourceReference(BaseModel):
     #: Which of the two times above ``observed_at`` really is. See
     #: :class:`ObservationBasis`.
     observed_at_basis: ObservationBasis = ObservationBasis.UNKNOWN
+    #: For a source whose data has no single production time — see :class:`ElementAge`.
+    #: ``None`` means the source reports one time for the whole payload, which is the
+    #: common case; it does not mean "the members are recent".
+    element_age: ElementAge | None = None
     request_context: dict[str, Any] = Field(default_factory=dict)
     data_version: str = "1"
     confidence: float = Field(default=1.0, ge=0, le=1)

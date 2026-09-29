@@ -8,7 +8,7 @@ The live end-to-end checks live in tests/integration/test_free_providers_live.py
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import httpx
 import pytest
@@ -100,6 +100,14 @@ OVERPASS_PAYLOAD = {
             "id": 4786592337,
             "lat": 30.6777962,
             "lon": 104.0443055,
+            # `meta` timestamps, as `out center meta` really returns them. The ages here are
+            # deliberately far apart, because that spread is the fact the provider now reports:
+            # a snapshot minutes old can hold facts edited years ago.
+            "timestamp": "2019-03-14T08:21:05Z",
+            "version": 9,
+            "changeset": 68123456,
+            "user": "mapper-a",
+            "uid": 1001,
             "tags": {
                 "name": "成都永陵博物馆",
                 "name:en": "Chengdu Yongling Museum",
@@ -114,6 +122,11 @@ OVERPASS_PAYLOAD = {
             "id": 1756176916,
             "lat": 30.6466122,
             "lon": 104.0433717,
+            "timestamp": "2026-08-02T11:00:00Z",
+            "version": 3,
+            "changeset": 170000001,
+            "user": "mapper-b",
+            "uid": 1002,
             "tags": {
                 "amenity": "restaurant",
                 "cuisine": "chinese;hotpot",
@@ -124,6 +137,11 @@ OVERPASS_PAYLOAD = {
             "type": "way",
             "id": 999001,
             "center": {"lat": 30.6598, "lon": 104.0633},
+            "timestamp": "2021-11-30T02:15:44Z",
+            "version": 5,
+            "changeset": 114000000,
+            "user": "mapper-c",
+            "uid": 1003,
             "tags": {"tourism": "hotel", "name": "成都锦江宾馆", "stars": "5", "brand": "Jinjiang"},
         },
         # Unnamed elements must be dropped rather than surfaced as blank cards.
@@ -178,7 +196,12 @@ NOMINATIM_PAYLOAD = [
 ]
 
 
-def _handler(*, overpass_fail_first_mirror: bool = False, overpass_omit_osm_base: bool = False):
+def _handler(
+    *,
+    overpass_fail_first_mirror: bool = False,
+    overpass_omit_osm_base: bool = False,
+    overpass_omit_meta: bool = False,
+):
     def handler(request: httpx.Request) -> httpx.Response:
         host = request.url.host
         path = request.url.path
@@ -189,12 +212,27 @@ def _handler(*, overpass_fail_first_mirror: bool = False, overpass_omit_osm_base
         if host == "overpass-api.de" and overpass_fail_first_mirror:
             return httpx.Response(504, text="server is probably too busy")
         if "overpass" in host or host == "maps.mail.ru":
+            payload = OVERPASS_PAYLOAD
             if overpass_omit_osm_base:
                 # An Overpass response with no `osm3s.timestamp_osm_base`. Real responses
                 # normally carry it, which is exactly why the fallback path went unnoticed.
-                payload = {key: value for key, value in OVERPASS_PAYLOAD.items() if key != "osm3s"}
-                return httpx.Response(200, json=payload)
-            return httpx.Response(200, json=OVERPASS_PAYLOAD)
+                payload = {key: value for key, value in payload.items() if key != "osm3s"}
+            if overpass_omit_meta:
+                # The same response with no per-element `meta`. This is the genuinely
+                # unknowable case: neither the batch nor the members carry a time, so "we
+                # cannot tell how old this is" is the only honest answer.
+                payload = {
+                    **payload,
+                    "elements": [
+                        {
+                            key: value
+                            for key, value in element.items()
+                            if key not in {"timestamp", "version", "changeset", "user", "uid"}
+                        }
+                        for element in payload["elements"]
+                    ],
+                }
+            return httpx.Response(200, json=payload)
         if host == "api.open-meteo.com":
             return httpx.Response(200, json=FORECAST_PAYLOAD)
         if host == "routing.openstreetmap.de":
@@ -226,6 +264,7 @@ def build_stack(
     *,
     overpass_fail_first_mirror: bool = False,
     overpass_omit_osm_base: bool = False,
+    overpass_omit_meta: bool = False,
     routing_base_url: str = FOSSGIS_OSRM,
     **provider_kwargs,
 ):
@@ -236,6 +275,7 @@ def build_stack(
             _handler(
                 overpass_fail_first_mirror=overpass_fail_first_mirror,
                 overpass_omit_osm_base=overpass_omit_osm_base,
+                overpass_omit_meta=overpass_omit_meta,
             )
         ),
     )
@@ -776,6 +816,110 @@ async def test_overpass_uses_osm_snapshot_time_as_observation_time():
     await http.aclose()
 
 
+async def test_the_snapshot_time_is_not_the_age_of_the_elements():
+    """The distinction that makes 时效性 true for OSM rather than merely asserted.
+
+    ``osm3s.timestamp_osm_base`` is when OSM cut the database. It is genuinely
+    provider-reported, so the freshness check on it passes — and it says nothing about the
+    elements. Measured against the live service, 杭州西湖's snapshot was 1 minute old while the
+    median element had last been edited 914 days earlier, and 19 of 46 were over five years old.
+
+    So a plan built on snapshots taken this minute could pass every freshness check while
+    listing restaurants that closed years ago. The fixture carries one element from 2019 and one
+    from 2021 against a snapshot seconds old, so both halves are asserted at once.
+    """
+    http, _, poi, *_ = build_stack()
+    hotels = (await poi.search_hotels(make_profile())).data
+    reference = hotels[0].source_references[0]
+
+    element_age = reference.element_age
+    assert element_age is not None, (
+        "the reference carries no element age, so the snapshot time is being reported as the "
+        "age of the data"
+    )
+    assert element_age.count == 3, "all three mapped elements carry a `meta` timestamp"
+
+    # The snapshot and the elements are two different magnitudes, and that gap is the point.
+    # Asserted as a ratio rather than an absolute, because the fixture's snapshot is a fixed
+    # instant while "now" moves: the claim being tested is that the reported data age is about
+    # our copy, not about the facts in it.
+    assert reference.data_age_seconds < 3 * 86400, "the fixture snapshot is days old at most"
+    assert element_age.median_seconds > reference.data_age_seconds * 100, (
+        "the median element must be orders of magnitude older than the snapshot; if the two are "
+        "close, the snapshot is being reported as the age of the data"
+    )
+    assert element_age.median_seconds > 365 * 86400, (
+        "the median element in this fixture is years old, and saying otherwise is the defect"
+    )
+    assert element_age.oldest_seconds > 5 * 365 * 86400
+
+    # The oldest element is named by its own absolute time, so a reader can check the claim
+    # rather than trusting a relative age that decays as the plan sits in the database.
+    assert element_age.oldest_at.isoformat().startswith("2019-03-14")
+    assert element_age.median_days > 365
+
+    # And every element is older than the one-day horizon for a POI listing, which is the
+    # finding the audit now raises.
+    assert element_age.older_than_horizon == 3
+    assert element_age.horizon_seconds == 86400
+    await http.aclose()
+
+
+async def test_the_median_is_the_middle_element_and_not_an_average():
+    """Which statistic it is, pinned to the actual middle element.
+
+    A mean would let a bulk of current entries hide an ancient one, and that is the failure that
+    sends a traveller to a closed shop: "44 current restaurants and one shut in 2011" and "45
+    restaurants mapped last month" can share a mean. So the median is asserted against the
+    fixture's own middle element — 2021-11-30, between the 2019 and 2026 ones — which no mean,
+    minimum or maximum can also satisfy.
+    """
+    http, _, poi, *_ = build_stack()
+    hotels = (await poi.search_hotels(make_profile())).data
+    element_age = hotels[0].source_references[0].element_age
+    assert element_age is not None
+
+    middle = datetime(2021, 11, 30, 2, 15, 44, tzinfo=timezone.utc)
+    expected_median = (element_age.computed_at - middle).total_seconds()
+    assert abs(element_age.median_seconds - expected_median) < 2, (
+        f"median is {element_age.median_seconds}s but the middle element is "
+        f"{expected_median:.0f}s old — a mean, min or max would land elsewhere"
+    )
+
+    # And it is genuinely bracketed by the other two, so the fixture has a spread to detect.
+    oldest = datetime(2019, 3, 14, 8, 21, 5, tzinfo=timezone.utc)
+    newest = datetime(2026, 8, 2, 11, 0, 0, tzinfo=timezone.utc)
+    assert (
+        element_age.oldest_seconds
+        > expected_median
+        > (element_age.computed_at - newest).total_seconds()
+    )
+    assert element_age.oldest_seconds == int((element_age.computed_at - oldest).total_seconds())
+    await http.aclose()
+
+
+async def test_os_map_reports_no_element_age_when_the_response_carries_no_meta():
+    """``None``, not zeros. Absent metadata is not a set of freshly edited elements.
+
+    A request without ``meta`` — or an older mirror — returns no per-element timestamps. Zeros
+    would be read as "everything was edited this minute", which is the exact claim this whole
+    change exists to stop being made. The snapshot time is still reported, because it is still
+    real.
+    """
+    http, _, poi, *_ = build_stack(overpass_omit_meta=True)
+    hotels = (await poi.search_hotels(make_profile())).data
+    reference = hotels[0].source_references[0]
+
+    assert reference.element_age is None
+    # The snapshot is still provider-reported and still reported: it is a true statement about
+    # our copy, and dropping it would lose information rather than avoid a false one.
+    assert reference.observed_at_basis is ObservationBasis.PROVIDER_REPORTED
+    assert reference.observed_at.isoformat().startswith("2026-09-27T16:13:33")
+    # And the context does not claim an age it does not have.
+    assert "element_age_median_days" not in reference.request_context
+    await http.aclose()
+
+
 async def test_a_silent_osm_response_is_not_reported_as_a_provider_stamped_one():
     """The 时效性 rule applied to the one provider that had it backwards.
 
@@ -820,12 +964,21 @@ async def test_a_silent_osm_response_is_reported_as_age_unknown_by_the_audit():
     audit saw a datum 0 seconds old and said nothing at all — the plan silently implied the OSM
     data was current. With ``SOURCE_SILENT`` it is reported as ``age_unknown``, which is the
     honest finding: we asked, and nobody told us when the data was made.
+
+    Both the batch time **and** the per-element `meta` are withheld, because that is what
+    "nobody told us" means. With meta present the audit now answers ``too_old`` instead —
+    a more useful finding, and the subject of its own tests below.
     """
     from travel_api.services.freshness import FreshnessService
 
-    http, _, poi, *_ = build_stack(overpass_omit_osm_base=True)
+    http, _, poi, *_ = build_stack(overpass_omit_osm_base=True, overpass_omit_meta=True)
     hotels = (await poi.search_hotels(make_profile())).data
     references = hotels[0].source_references
+
+    assert references[0].element_age is None, (
+        "the fixture still carries meta, so this test would pass without exercising the "
+        "genuinely-unknown path"
+    )
 
     findings = FreshnessService().audit([("attraction", ref) for ref in references])
     assert findings, (
@@ -1458,7 +1611,16 @@ def test_overpass_query_is_bounded_and_has_per_category_limits():
     assert query.count(bbox) == 3
     # Each category needs its own budget, otherwise the first category in
     # element order consumes the whole allowance.
-    assert ".hotels out center 11;" in query
-    assert ".food out center 22;" in query
-    assert ".sights out center 33;" in query
+    #
+    # `meta` is required alongside `center`: without it OSM returns no per-element
+    # `timestamp`, so the only age available is the database snapshot — which is minutes old
+    # for a city whose elements are years old. Asserted here so dropping it fails loudly
+    # rather than silently reverting to reporting fresh snapshots as fresh data.
+    assert ".hotels out center meta 11;" in query
+    assert ".food out center meta 22;" in query
+    assert ".sights out center meta 33;" in query
+    # `center` must come before `meta`. Both orders are accepted by Overpass in practice, but
+    # `center` is what makes ways carry coordinates at all: reverse them and every way is
+    # dropped by the parser, silently reducing the POI set to nodes.
+    assert "out meta center" not in query
     json.dumps(query)  # must be serialisable as a form value

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import statistics
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from travel_api.domain.models import (
     Attraction,
     Coordinates,
     DataDomain,
+    ElementAge,
     Hotel,
     Location,
     Money,
@@ -48,6 +50,7 @@ from travel_api.domain.models import (
 from travel_api.providers.free.geo import OSM_ATTRIBUTION, GeoResolver
 from travel_api.providers.free.http import FreeHttpClient
 from travel_api.providers.free.opening_hours import parse_opening_hours
+from travel_api.services.freshness import FreshnessService
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +216,16 @@ class _Poi:
     latitude: float
     longitude: float
     tags: dict
+    #: When this element was last edited in OSM, from ``out ... meta``.
+    #:
+    #: This is the age of the *fact*, and it is a different number from the age of the response.
+    #: Measured against the live service, the OSM database snapshot is typically minutes old
+    #: while the median element in a well-mapped city was last touched **years** ago — a
+    #: restaurant that closed in 2019 is still served from a snapshot taken this minute. See
+    #: ``element_age`` on the reference, and ``docs/architecture/realtime-data.md``.
+    #:
+    #: ``None`` when the response carried no metadata, which must not be read as "just edited".
+    edited_at: datetime | None = None
 
     @property
     def identity(self) -> str:
@@ -261,18 +274,26 @@ class OverpassPoiProvider:
         testing left only 3 attractions out of 120 because hotels and restaurants
         consumed the whole allowance. Per-category sets keep each category
         represented, and it is still a single request against this shared service.
+
+        ``meta`` is requested so each element carries its own last-edit ``timestamp``. Without
+        it the only age available is ``osm3s.timestamp_osm_base`` — the OSM database snapshot,
+        which is minutes old for a city whose elements are years old. The two are reported
+        separately rather than conflated; see ``_source_reference``.
         """
         hotel_filter = "|".join(HOTEL_TOURISM_VALUES)
         food_filter = "|".join(FOOD_AMENITY_VALUES)
         attraction_filter = "|".join(ATTRACTION_TOURISM_VALUES)
+        # ``center`` before ``meta``: verbosity/geometry ordering is documented either way
+        # round in practice, but this is the form verified against the live service, including
+        # that ways still come back with a ``center``. Losing it would drop every way.
         return (
             f"[out:json][timeout:{self.query_timeout_seconds}];"
             f'nwr["tourism"~"^({hotel_filter})$"]({bbox})->.hotels;'
             f'nwr["amenity"~"^({food_filter})$"]({bbox})->.food;'
             f'nwr["tourism"~"^({attraction_filter})$"]({bbox})->.sights;'
-            f".hotels out center {self.hotel_limit};"
-            f".food out center {self.food_limit};"
-            f".sights out center {self.attraction_limit};"
+            f".hotels out center meta {self.hotel_limit};"
+            f".food out center meta {self.food_limit};"
+            f".sights out center meta {self.attraction_limit};"
         )
 
     async def _load_pois(self, destination: str) -> tuple[list[_Poi], SourceReference]:
@@ -302,6 +323,7 @@ class OverpassPoiProvider:
             reference = self._source_reference(
                 source_id=f"overpass:{place.bbox_string}",
                 osm_base=osm_base,
+                pois=pois,
                 request_context={
                     "destination": destination,
                     "resolved_city": place.city,
@@ -342,6 +364,26 @@ class OverpassPoiProvider:
         return None
 
     @staticmethod
+    def _element_timestamp(element: dict) -> datetime | None:
+        """One element's last-edit time, from the ``meta`` block.
+
+        Separate from ``_osm_base_timestamp`` because they answer different questions and have
+        been confused for each other: this one is when *this fact* last changed, that one is
+        when the database we asked was last rebuilt. Returns ``None`` when absent — an element
+        with no metadata is not an element that was just edited.
+        """
+        raw = element.get("timestamp")
+        if not isinstance(raw, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    @staticmethod
     def _parse_elements(payload: dict) -> list[_Poi]:
         pois: list[_Poi] = []
         seen: set[tuple[str, int]] = set()
@@ -372,6 +414,7 @@ class OverpassPoiProvider:
                         latitude=float(latitude),
                         longitude=float(longitude),
                         tags=tags,
+                        edited_at=OverpassPoiProvider._element_timestamp(element),
                     )
                 )
             except (KeyError, TypeError, ValueError):
@@ -585,8 +628,43 @@ class OverpassPoiProvider:
             }
         )
 
+    @staticmethod
+    def _element_age(pois: list[_Poi], *, now: datetime) -> ElementAge | None:
+        """The age distribution of the elements just returned, or ``None`` if nobody said.
+
+        ``None`` rather than zeros when no element carried a timestamp: a set of zeros would
+        read as "everything was edited this minute", which is the claim this exists to stop
+        being made. The caller keeps the snapshot time for ``observed_at`` either way.
+
+        The horizon comes from the freshness policy, so the count of over-age elements is
+        measured against the same rule that will report them — one policy, not two.
+        """
+        stamps = [poi.edited_at for poi in pois if poi.edited_at is not None]
+        if not stamps:
+            return None
+
+        ages = sorted(max(0.0, (now - stamp).total_seconds()) for stamp in stamps)
+        # `statistics.median` on a sorted list; the middle element for an odd count, the mean
+        # of the two middle ones for an even count — which is why the result is rounded.
+        median_seconds = int(statistics.median(ages))
+        horizon = FreshnessService().policy.max_age_for("attraction")
+        if horizon is None:
+            # No horizon means the policy claims nothing about this kind of fact, so there is
+            # no count to report. The ages are still real and are still reported.
+            horizon = 0
+        return ElementAge(
+            count=len(stamps),
+            median_seconds=median_seconds,
+            oldest_seconds=int(ages[-1]),
+            oldest_at=now - timedelta(seconds=ages[-1]),
+            older_than_horizon=sum(1 for age in ages if horizon and age > horizon),
+            # Recorded rather than assumed, and never zero: the model requires it positive.
+            horizon_seconds=horizon or 86400,
+            computed_at=now,
+        )
+
     def _source_reference(
-        self, *, source_id: str, osm_base: datetime | None, request_context: dict
+        self, *, source_id: str, osm_base: datetime | None, request_context: dict, pois: list[_Poi]
     ) -> SourceReference:
         """One reference for this POI set, with the basis the response actually supports.
 
@@ -603,6 +681,13 @@ class OverpassPoiProvider:
         Before this, the missing case wrote the current time and still claimed
         ``PROVIDER_REPORTED``, so an undated OSM response produced a reference asserting that
         the data was seconds old and that OSM had said so.
+
+        A third thing is attached that neither of the two cases expresses: ``element_age``.
+        ``observed_at`` here is the snapshot instant, and it is genuinely reported — but it
+        describes *our copy of the database*, not the facts in it. A snapshot cut a minute ago
+        routinely contains elements last edited years earlier, so on its own it would report
+        those facts as a minute old. The distribution goes alongside rather than replacing it,
+        because both statements are true and a reader needs both.
         """
         now = datetime.now(timezone.utc)
         if osm_base is None:
@@ -613,6 +698,16 @@ class OverpassPoiProvider:
             context = request_context
             observed_at = osm_base
             basis = ObservationBasis.PROVIDER_REPORTED
+        element_age = self._element_age(pois, now=now)
+        if element_age is not None:
+            # Recorded in the context as well, so a reader with only the JSON has it without
+            # knowing about the typed field.
+            context = {
+                **context,
+                "element_age_median_days": element_age.median_days,
+                "element_age_oldest_days": round(element_age.oldest_seconds / 86400, 1),
+                "element_age_over_horizon": element_age.older_than_horizon,
+            }
         return SourceReference(
             source=self.name,
             source_type=SourceType.OPEN_DATA,
@@ -621,6 +716,7 @@ class OverpassPoiProvider:
             observed_at_basis=basis,
             fetched_at=now,
             expires_at=now + timedelta(seconds=self.poi_ttl_seconds),
+            element_age=element_age,
             request_context=context,
             data_version="osm-live",
             confidence=0.9,

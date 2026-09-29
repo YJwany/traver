@@ -31,6 +31,7 @@ from travel_api.domain.models import (
     BudgetItem,
     Coordinates,
     DataDomain,
+    ElementAge,
     Itinerary,
     ItineraryDay,
     ItineraryItem,
@@ -220,6 +221,130 @@ def test_every_source_reference_lists_both_of_its_times_and_what_the_second_mean
         assert raw not in markdown, f"the raw basis identifier {raw!r} reached the document"
     # The absolute fetch instant is printed, not only a relative age.
     assert "2026-09-28 10:00 UTC" in markdown
+
+
+# -- A source whose members have their own ages ---------------------------------------
+
+
+def _aged_reference(
+    *,
+    median_days: float = 914,
+    oldest_days: float = 5638,
+    over_horizon: int = 46,
+    count: int = 46,
+) -> SourceReference:
+    """An Overpass-shaped reference: a fresh snapshot holding facts edited years ago."""
+    return SourceReference(
+        source="openstreetmap",
+        source_type=SourceType.OPEN_DATA,
+        source_id="overpass:30.23,120.13,30.27,120.17",
+        observed_at=OBSERVED,
+        fetched_at=FETCHED,
+        observed_at_basis=ObservationBasis.PROVIDER_REPORTED,
+        element_age=ElementAge(
+            count=count,
+            median_seconds=int(median_days * 86400),
+            oldest_seconds=int(oldest_days * 86400),
+            oldest_at=OBSERVED - timedelta(days=oldest_days),
+            older_than_horizon=over_horizon,
+            horizon_seconds=86400,
+            computed_at=FETCHED,
+        ),
+        domain=DataDomain.GEO_FACT,
+    )
+
+
+def test_the_export_prints_the_age_distribution_not_just_the_snapshot():
+    """The 时效性 requirement, applied to the artifact that leaves the application.
+
+    This is the export half of the same defect. The source table prints 「数据自身时间」, which
+    for Overpass is ``osm3s.timestamp_osm_base`` — genuinely provider-reported, and minutes old.
+    Printed alone it tells a reader the OSM rows are minutes old, when measured against the live
+    service the median element had last been edited 914 days earlier and 19 of 46 were over five
+    years old.
+
+    A traveller reading only this document would have no way to know that. So the distribution
+    is printed, with the oldest element named by its own date.
+    """
+    preview = _preview(references=[_aged_reference()])
+    markdown = to_markdown(_trip(preview=preview), generated_at=GENERATED)
+
+    assert "逐条数据的自身时间" in markdown, (
+        "the export printed only the snapshot time, so a reader is told OSM's rows are minutes "
+        "old when the facts in them are years old"
+    )
+    # The numbers themselves, so the section cannot be present-but-empty.
+    assert "914.0 天" in markdown
+    assert "46 条" in markdown
+    assert "46 条已超出" in markdown
+    # The oldest element's own date is printed, not only a relative age that decays.
+    oldest_date = (OBSERVED - timedelta(days=5638)).date().isoformat()
+    assert oldest_date in markdown
+    # And the sentence that keeps the two times from being confused for each other.
+    assert "「数据自身时间」与「逐条时间」是两件事" in markdown
+    assert "前者可以很新而后者仍然很久" in markdown
+
+    # The sentence must not assert how old such a snapshot usually is. The first draft said
+    # 「通常只有几分钟」 — true for the 杭州 probe (1 minute) and printed directly beneath a row
+    # reading 「27 小时」, and 成都's mirror served a 146-day-old snapshot. A magnitude measured in
+    # one place cannot describe a source, and a document that contradicts its own table is worse
+    # than one that stays quiet about magnitudes.
+    assert "几分钟" not in markdown, (
+        "the note claims snapshots are usually minutes old, which contradicts the table above it "
+        "and was measured in exactly one city"
+    )
+
+
+def test_the_export_says_when_over_age_entries_were_kept_rather_than_dropped():
+    """Dropping them would convert "possibly out of date" into "does not exist".
+
+    An old OSM record is a real place that may simply be under-mapped. Removing it would make
+    the plan look tidier while removing a traveller's option, so the entries stay and the
+    document says so.
+    """
+    preview = _preview(references=[_aged_reference(over_horizon=12, count=46)])
+    markdown = to_markdown(_trip(preview=preview), generated_at=GENERATED)
+    assert "未从计划中删除" in markdown
+    assert "可能已经过时" in markdown
+
+
+def test_a_source_whose_members_are_all_current_still_prints_the_distribution():
+    """Absent is not empty, applied to this section.
+
+    Suppressing the section when every member is current looks tidy and is wrong: a reader would
+    then see the same thing — nothing — for "all 46 entries were edited within the last day" and
+    for "this source reports no member ages at all". Those are opposite situations, and the
+    second is the one that should prompt caution.
+
+    What must *not* print when nothing is over age is the warning about entries being out of
+    date, because a warning that appears when there is nothing to warn about is one a reader
+    learns to skip.
+    """
+    preview = _preview(
+        references=[_aged_reference(median_days=0.2, oldest_days=0.6, over_horizon=0)]
+    )
+    markdown = to_markdown(_trip(preview=preview), generated_at=GENERATED)
+
+    # The ages are stated, so "current" is a claim the document makes rather than implies.
+    assert "逐条数据的自身时间" in markdown
+    assert "0.2 天" in markdown
+    assert "0 条已超出" in markdown
+    # And the warnings about kept-but-old entries do not appear.
+    assert "未从计划中删除" not in markdown
+    assert "「数据自身时间」与「逐条时间」是两件事" not in markdown, (
+        "the note explaining that the batch time is not the age of the rows printed while no row "
+        "was over age, which is noise"
+    )
+
+
+def test_a_source_without_element_ages_prints_no_distribution():
+    """Most sources do report one time for the whole payload, and they must be unaffected."""
+    preview = _preview(references=[_reference(basis=ObservationBasis.PROVIDER_REPORTED)])
+    markdown = to_markdown(_trip(preview=preview), generated_at=GENERATED)
+    # The source table is still there...
+    assert "抓取时间" in markdown
+    # ...and the member-level section is not, because there is nothing to put in it.
+    assert "逐条数据的自身时间" not in markdown
 
 
 # -- The manufactured-verification guard ---------------------------------------------
