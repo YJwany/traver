@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import statistics
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,6 +34,7 @@ from travel_api.domain.models import (
     Coordinates,
     DataDomain,
     ElementAge,
+    ElementAgeKind,
     Hotel,
     Location,
     Money,
@@ -632,35 +632,16 @@ class OverpassPoiProvider:
     def _element_age(pois: list[_Poi], *, now: datetime) -> ElementAge | None:
         """The age distribution of the elements just returned, or ``None`` if nobody said.
 
-        ``None`` rather than zeros when no element carried a timestamp: a set of zeros would
-        read as "everything was edited this minute", which is the claim this exists to stop
-        being made. The caller keeps the snapshot time for ``observed_at`` either way.
-
-        The horizon comes from the freshness policy, so the count of over-age elements is
-        measured against the same rule that will report them — one policy, not two.
+        The statistic itself lives on :meth:`ElementAge.of`, shared with the review path, so the
+        two cannot drift into reporting the same shape two different ways. The horizon comes from
+        the freshness policy, so the count of over-age elements is measured against the same rule
+        that will report them — one policy, not two.
         """
-        stamps = [poi.edited_at for poi in pois if poi.edited_at is not None]
-        if not stamps:
-            return None
-
-        ages = sorted(max(0.0, (now - stamp).total_seconds()) for stamp in stamps)
-        # `statistics.median` on a sorted list; the middle element for an odd count, the mean
-        # of the two middle ones for an even count — which is why the result is rounded.
-        median_seconds = int(statistics.median(ages))
-        horizon = FreshnessService().policy.max_age_for("attraction")
-        if horizon is None:
-            # No horizon means the policy claims nothing about this kind of fact, so there is
-            # no count to report. The ages are still real and are still reported.
-            horizon = 0
-        return ElementAge(
-            count=len(stamps),
-            median_seconds=median_seconds,
-            oldest_seconds=int(ages[-1]),
-            oldest_at=now - timedelta(seconds=ages[-1]),
-            older_than_horizon=sum(1 for age in ages if horizon and age > horizon),
-            # Recorded rather than assumed, and never zero: the model requires it positive.
-            horizon_seconds=horizon or 86400,
-            computed_at=now,
+        return ElementAge.of(
+            (poi.edited_at for poi in pois),
+            now=now,
+            horizon_seconds=FreshnessService().policy.max_age_for("attraction"),
+            member_kind=ElementAgeKind.EDITED,
         )
 
     def _source_reference(

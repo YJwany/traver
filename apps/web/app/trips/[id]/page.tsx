@@ -13,6 +13,7 @@ import { Disagreements } from "../../components/disagreements";
 import { AgeUnknownPanel } from "../../components/freshness-coverage";
 import { ExportPanel } from "../../components/export-panel";
 import { IngestedPlacesPanel } from "../../components/ingested-places";
+import { ReviewsPanel } from "../../components/reviews";
 import { unmatchedMentionWording, type ResolvedPlace } from "../../../lib/ingested-places";
 import { placePins } from "../../../lib/map";
 import { PACE_LABELS, TRAVEL_MODE_LABELS } from "../../components/plan-form";
@@ -263,6 +264,7 @@ export default function TripWorkspacePage({ params }: { params: { id: string } }
     <StaleFactBanner facts={trip.preview?.stale_facts ?? []} />
     <AgeUnknownPanel preview={trip.preview} />
     <IngestedNotesPanel notes={trip.preview?.ingested_notes ?? []} places={trip.preview?.ingested_places} />
+    <ReviewsPanel reviews={trip.preview?.reviews ?? []} />
     {/* Reported after the notes, because it is about them: these are the names in your own
         material that our sources did not have. Passing the raw field, not `?? []`, so an api
         that does not report resolutions renders nothing instead of "we looked and found none". */}

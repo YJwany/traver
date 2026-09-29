@@ -63,6 +63,7 @@ assert payload["uncovered_capabilities"] == [], (
 ```
 [FULL] search_hotels       providers=['openstreetmap']
 [NONE] search_room_offers  providers=[]
+[NONE] search_reviews      providers=[]
 [PART] calculate_routes    providers=['osrm']
          ok  driving      驾车      ['osrm']
          MISS transit     公交/地铁  []    closable_by=source
@@ -128,14 +129,16 @@ assert payload["uncovered_capabilities"] == [], (
 
 修高德那一条时发现了同一处的第二个实例，而且更难发现，因为它不涉及任何会说谎的文案——只是**少了行**。
 
-`CATALOG.capabilities` 只有三条（`search_hotels`、`search_restaurants`、`calculate_routes`），全部 `covered: true`；而同一份 fixture 的 `uncovered_capabilities` 和 `capability_gaps` 都在讲第四条 `search_room_offers`——**一条矩阵里根本不存在的行**。服务端实际发的是九条。
+`CATALOG.capabilities` 只有三条（`search_hotels`、`search_restaurants`、`calculate_routes`），全部 `covered: true`；而同一份 fixture 的 `uncovered_capabilities` 和 `capability_gaps` 都在讲第四条 `search_room_offers`——**一条矩阵里根本不存在的行**。服务端实际发的是十条。
 
 于是：
 
 - 矩阵里 `无来源` 那个分支（`{row.covered ? row.providers.join("、") : "无来源"}`）在生产里会渲染，在测试里**从未渲染过**——而它标的正是全屏最重要的一行：唯一一个谁都提供不了的能力，也是读者去矩阵里专门要找的那一行。它被写成空字符串、写成 capability id、或把空 provider 列表渲染成一片空白，测试都不会响；
 - 一份**自相矛盾**的 fixture（缺口报告指着一行不存在的能力）让失败无法解释：数字对不上时，分不清是组件的错还是 fixture 的错。
 
-现在矩阵补齐到服务端真实发的九条（顺序也一致），并加了三条渲染测试：未覆盖行的来源格必须写 `无来源` 而不是留白、它的圆点必须是 `dot-off`、以及**矩阵渲染出的行序必须与 `CATALOG.capabilities` 逐项相等**（既不许少，也不许多）。同时 `test_the_matrix_fixture_lists_every_capability_the_server_sends` 把这份 fixture 的 `(capability, label)` 序列直接对着真实响应比较，并额外检查 fixture 自己的缺口报告只引用存在的行。
+现在矩阵补齐到服务端真实发的十条（顺序也一致），并加了三条渲染测试：未覆盖行的来源格必须写 `无来源` 而不是留白、它的圆点必须是 `dot-off`、以及**矩阵渲染出的行序必须与 `CATALOG.capabilities` 逐项相等**（既不许少，也不许多）。同时 `test_the_matrix_fixture_lists_every_capability_the_server_sends` 把这份 fixture 的 `(capability, label)` 序列直接对着真实响应比较，并额外检查 fixture 自己的缺口报告只引用存在的行。
+
+补 `search_reviews` 时这条守卫立刻响了（`server only: [('search_reviews', '评价与评分')]`），并连带暴露三条**把 fixture 的大小当成组件行为**的断言：`7 / 9 完整可用`（改回从 `CATALOG.capabilities` 自己算）、`没有任何已接入的来源能提供它` 用 `getByText`（第二个缺口一出现就匹配到多个元素而抛错）、以及 `1 项能力完全没有来源`。第三条尤其值得记：**一条在只有一个缺口时成立的断言，在有两个缺口时不成立**——它验证的是数量不是行为。
 
 顺带修掉一条**把 fixture 的不足当成组件行为**钉住的断言：`expect(screen.getByText("2 / 3 完整可用"))`。3 是 fixture 少写行造成的，不是组件的行为；现在它读 `CATALOG.capabilities` 自己算，补行不会再让它变错，而"标题不许说谎"由另一条关于「只覆盖一部分」的断言守着。
 
@@ -174,3 +177,31 @@ assert payload["uncovered_capabilities"] == [], (
 ## 顺带一提：高德的房型
 
 高德的 Web 服务 API **不提供**房型与实时房价（POI 搜索返回的数据里没有房价/评分/评论数/门票价）。要拿到房价需要接入商业酒店渠道。所以 `search_room_offers` 在当前 catalogue 里**没有**任何 `needs_credentials` 的候选——这也是为什么它进的是 `capability_gaps` 而不是解锁提示。
+
+## 第二个缺口：评价与评分
+
+`search_reviews` 是 `capability_gaps` 的第二条，理由不同但结构相同。
+
+### 为什么它是一个能力，而不是 `rating` 字段
+
+`Hotel.rating` 和 `Restaurant.rating` 一直存在，而且**永远是 `None`**：OpenStreetMap 的 `stars` 是自我声明的星级分类而不是住客评分，高德把 `rating` / `review_count` 明确写在自己的 `absent_fields` 里。所以这个字段读起来像「不适用」，而真相是「没有来源」——读者无法从中得知接一个来源能不能填上它。
+
+更关键的是**用户的要求本身就是关于时间的**：「只能用近期的评价……不能是那种几年前那种」。一个 `float` 没有地方放日期，因此「4.8 分」在 2019 年和上个月是同一个数字、两件不同的事。所以 `Review` 有 `published_at`，而 `MAX_AGE_SECONDS["review"]`（18 个月）是这套里唯一为用户明确提出的要求而存在的时限。
+
+`published_at` 和 `age_days` 都用 `None` 而不是 `0` 表示「来源没说」：`0` 是一句断言（「今天写的」），一个缺失的日期不许替它做这个断言。
+
+### 这个能力和房型报价一样是「承诺」，所以必须有调用点
+
+`capability_gaps` 里每一条都带 `closable_by: "source"`，那是写给读者的一句承诺：**接一个来源就会有用**。如果矩阵里声明了 `search_reviews` 而规划流程从不调用它，那句承诺就是假的——设置页会在乐观的方向上撒谎，而这正是房型报价那个 bug 的形状。
+
+所以 `build_preview` 里有真实的调用点，接在实体聚合之后、地名定位之前，且**无条件播报这一步**（没有来源时显示「无来源，跳过」），理由与房型报价那一步相同：步骤列表每次运行形状一致，才分得清「没问过」和「静默失败」。`test_reviews_capability.py::test_a_connected_review_source_is_actually_called` 就是钉住这件事的——删掉调用点，这个测试失败，其余全绿。
+
+### 逐条日期必须由聚合层推导，不能交给 provider
+
+这是与 Overpass 路径**刻意不同**的一处。Overpass 的 `ElementAge` 必须由 provider 算，因为只有它看得到 `meta` 块；而评价的日期就在聚合层已经拿到的数据里，所以：
+
+> provider 忘了汇总、或者在一批四年前的评价上盖了一个「刚刚抓到」的 `observed_at`，都会**静默通过**时效检查——`observed_at_basis` 是 `PROVIDER_REPORTED`，`age_is_about_the_data` 为真，检查的是批次时刻而不是评价。这个失败不可见且偏向乐观，所以值得在结构上让它不可能发生。**provider 不会忘记一件不需要它做的事。**
+
+`ElementAge.of` 是两个生产者共用的：`member_kind` 区分「最后**修改**」（OSM 元素，可被反复编辑）与「**写于**」（评价，写一次不再改）。这个词必须跟着记录种类走，因为报告会被存进行程、以后单独阅读，读者身边没有能力名可以消歧——把一条评价说成「最后修改于」等于凭空发明了一次编辑。`test_a_review_set_is_described_as_written_not_as_modified` 与 `test_an_osm_element_set_is_still_described_as_edited` 从两侧钉住它：只钉一侧的话，一个「全都印写成『写于』」的实现会通过评价那条而悄悄改掉 OSM 那半句的claim。
+
+变异验证：12 条全部被抓（`scripts/mutate_reviews_capability.py`）。其中两条第一次**没**被抓——`M7` 把评价的 `member_kind` 设成 OSM 的词、`M11` 把 Overpass 的说成「写于」。原因是测试只钉在**消费者**（导出）那一侧，而导出用的是自己手搓的 fixture，所以两个**生产者**都没被覆盖。补上生产者侧的断言后才抓住——**又一条「测试写在自己的假设上就不可能失败」**。第三次则是harness自己的错：`M11` 的目标测试列表里漏了钉住该生产者的那个套件，于是守卫存在而报告说没抓住。

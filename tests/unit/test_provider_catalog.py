@@ -673,9 +673,10 @@ def test_catalog_endpoint_reports_a_usable_deployment(tmp_path):
     # was counted as coverage. So the catalogue asserted that a deployment which cannot
     # obtain a room rate was fully covered — the test was pinning the bug.
     #
-    # One gap is the honest answer for this deployment: rates require a commercial hotel
-    # channel, and none is integrated. Everything else is served by keyless sources.
-    assert payload["uncovered_capabilities"] == ["search_room_offers"]
+    # Two gaps is the honest answer for this deployment: rates require a commercial hotel
+    # channel, and reviews require a source that publishes a score *with a date*. Neither is
+    # integrated, and neither can be produced by any keyless source. Everything else is served.
+    assert payload["uncovered_capabilities"] == ["search_room_offers", "search_reviews"]
     # And the gap is named with a reason, not just counted, so a reader learns what to plug
     # in rather than having to diff the matrix against their expectations.
     gap = next(
@@ -683,6 +684,10 @@ def test_catalog_endpoint_reports_a_usable_deployment(tmp_path):
     )
     assert gap["label"]
     assert "估算" in gap["note"], "the note must say what happens instead of a real rate"
+    # Every uncovered capability must carry a note. A nameless gap in the gap list is worse
+    # than no gap list, because it reads as a rendering bug rather than as advice.
+    for entry in payload["capability_gaps"]:
+        assert entry["note"].strip(), f"{entry['capability']} is uncovered with no explanation"
     assert "openstreetmap" in payload["registered"]
     ids = {item["id"] for item in payload["providers"]}
     assert {"openstreetmap", "amap", "openai-compatible"} <= ids

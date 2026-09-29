@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+import statistics
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, Iterable
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -159,13 +160,29 @@ class RevisionAction(StrEnum):
     INCREASE_FOOD_BUDGET = "increase_food_budget"
 
 
+class ElementAgeKind(StrEnum):
+    """What the ages in an :class:`ElementAge` measure.
+
+    Needed because the report says *when the members were made*, and "made" is a different
+    verb for each kind of record. An OSM element is last **edited**; a review is **written**
+    once and never modified. Using one word for both would describe a review as having been
+    modified on some later date, which no reviewer did — and the sentence is stored with the
+    plan and read later, so it cannot rely on the reader knowing the context.
+    """
+
+    EDITED = "edited"
+    PUBLISHED = "published"
+
+
 class ElementAge(BaseModel):
     """How old the members of a *set* of data are, when no single instant can say.
 
     ``SourceReference.observed_at`` assumes a datum has one production time. Some sources do
     not: an Overpass response is one snapshot of OSM elements that were last edited years
     apart, so the only timestamp the source publishes — ``osm3s.timestamp_osm_base`` — is when
-    the *database* was cut, not when any fact in it was made.
+    the *database* was cut, not when any fact in it was made. A review response has the same
+    shape for a different reason: it is fetched in one request and contains opinions written
+    over years, so its single fetch time describes the request and nothing else.
 
     That distinction is the whole 时效性 requirement. Measured against the live service
     (``scripts/probe_osm_element_age.py``), 杭州西湖's snapshot was **1 minute** old while the
@@ -195,6 +212,57 @@ class ElementAge(BaseModel):
     horizon_seconds: int = Field(gt=0)
     #: The instant this was computed, because ages are only true as of a moment.
     computed_at: datetime
+    #: Defaulted rather than required so every existing construction — OSM's, and the stored
+    #: plans that predate this field — keeps its meaning without a migration.
+    member_kind: ElementAgeKind = ElementAgeKind.EDITED
+
+    @classmethod
+    def of(
+        cls,
+        moments: Iterable[datetime | None],
+        *,
+        now: datetime,
+        horizon_seconds: int | None,
+        member_kind: ElementAgeKind = ElementAgeKind.EDITED,
+    ) -> ElementAge | None:
+        """Summarise a set whose members were each made at their own time.
+
+        ``None`` rather than zeros when nothing carried a time: a set of zeros would read as
+        "everything was made this minute", which is the claim this exists to stop being made.
+        The absence is reported separately as ``age_unknown``, and the caller keeps the fetch
+        time for ``observed_at`` either way.
+
+        The horizon is passed in rather than looked up here, so the count of over-age members
+        is measured against the same rule that will report them — one policy, not two. A
+        ``None`` or zero horizon means the policy claims nothing about this kind of fact, so
+        nothing can be counted as over it while the ages themselves are still real.
+        """
+
+        def aware(value: datetime) -> datetime:
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+        stamps = [moment for moment in moments if moment is not None]
+        if not stamps:
+            return None
+
+        reference = aware(now)
+        ages = sorted(max(0.0, (reference - aware(stamp)).total_seconds()) for stamp in stamps)
+        horizon = int(horizon_seconds or 0)
+        return cls(
+            count=len(stamps),
+            # `statistics.median` on a sorted list; the middle element for an odd count, the
+            # mean of the two middle ones for an even count — which is why it is rounded.
+            median_seconds=int(statistics.median(ages)),
+            oldest_seconds=int(ages[-1]),
+            oldest_at=reference - timedelta(seconds=ages[-1]),
+            older_than_horizon=sum(1 for age in ages if horizon and age > horizon),
+            # Recorded rather than assumed, and never zero: the model requires it positive.
+            # When the policy has no horizon, a day is recorded and nothing is counted against
+            # it, so the field stays interpretable without implying a rule that does not exist.
+            horizon_seconds=horizon or 86400,
+            computed_at=reference,
+            member_kind=member_kind,
+        )
 
     @computed_field
     @property
@@ -468,6 +536,76 @@ class Attraction(BaseModel):
     source_references: list[SourceReference] = Field(default_factory=list)
     #: Fields where the merged sources disagreed; see :class:`FieldDisagreement`.
     disagreements: list[FieldDisagreement] = Field(default_factory=list)
+
+
+class Review(BaseModel):
+    """One person's opinion of a place, with the date they formed it.
+
+    Reviews are the reason this model exists rather than a bare ``rating: float`` on
+    :class:`Hotel` / :class:`Restaurant`. A rating with no date is not the fact a traveller
+    needs: 「4.8 分」 from 2019 and 「4.8 分」 from last month are the same number and different
+    facts. The user's requirement is explicit — 「只能用近期的评价……不能是那种几年前那种」 — and a
+    scalar rating cannot express it, because there is nowhere to put the date.
+
+    That gap was real: ``Hotel.rating`` and ``Restaurant.rating`` have always existed and are
+    **always ``None``**, because no connected source publishes guest ratings (OSM's ``stars``
+    is a self-declared classification, not a guest score; 高德 lists rating among its
+    ``absent_fields``). So the field read as "not applicable" when the truth was "no source",
+    and a reader could not tell that plugging in a source would fill it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: UUID = Field(default_factory=uuid4)
+    #: Which entity this is about, as that entity's **own** id — the same convention
+    #: ``HotelOffer.hotel_id`` and ``RoutePoint.entity_id`` follow, so the aggregation layer can
+    #: attach a review without knowing which source produced it. A provider receives these ids
+    #: in ``search_reviews`` and resolves them to its own place ids itself, exactly as a room
+    #: rate provider resolves a hotel id through its own records. Keeping the provider's private
+    #: id out of the shared model is what lets two review sources describe the same restaurant
+    #: without either one's id leaking into the other's data.
+    subject_id: str
+    rating: float | None = Field(default=None, ge=0, le=5)
+    #: The maximum the source's scale allows, when it is not 5. A 9/10 and a 4.5/5 are the
+    #: same opinion, and normalising without recording the original scale would invent
+    #: precision. ``None`` means the source did not state one.
+    rating_scale_max: float | None = Field(default=None, gt=0)
+    text: str | None = None
+    #: When the *reviewer* wrote it. This is the date the 时效性 rule applies to, and it is
+    #: deliberately not optional-with-a-default: ``None`` means the source did not say, which
+    #: is reported as age-unknown rather than as today.
+    published_at: datetime | None = None
+    #: Which source's scale this is, so two scores are never averaged as if comparable.
+    #: Averaging a 大众点评 4.2 with a Google 4.2 would be an arithmetic claim about two
+    #: different populations.
+    source: str
+    source_references: list[SourceReference] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def is_dated(self) -> bool:
+        """Whether this review can be judged for recency at all.
+
+        The whole point of the model: an undated review is not a recent one, and anything
+        that ranks by recency must be able to exclude it rather than assume.
+        """
+        return self.published_at is not None
+
+    @computed_field
+    @property
+    def age_days(self) -> int | None:
+        """Days since the reviewer wrote it, or ``None`` when nobody said.
+
+        ``None`` and ``0`` are kept distinct for the same reason ``SourceReference``
+        distinguishes them: zero means "written today", which is a claim, and an absent date
+        must not make it.
+        """
+        if self.published_at is None:
+            return None
+        moment = self.published_at
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - moment).total_seconds() // 86400))
 
 
 class RoutePoint(BaseModel):
@@ -978,6 +1116,21 @@ class TripPreview(BaseModel):
     #: that decision on their behalf. The list exists so the gap between "mentioned" and "in
     #: your plan" is visible and actionable rather than silently closed.
     ingested_places: list[dict[str, Any]] = Field(default_factory=list)
+    #: Dated opinions about the places in this plan, when a source that publishes them is
+    #: connected.
+    #:
+    #: Usually empty, and empty is the honest answer rather than a bug: no keyless source this
+    #: deployment has publishes a guest score, which is why ``Hotel.rating`` and
+    #: ``Restaurant.rating`` are always ``None`` too. Reported as its own list, next to
+    #: ``ingested_notes``, because the two are the same *kind* of evidence — somebody's account
+    #: of a place — and are kept apart from the entities' measured fields for the same reason:
+    #: a 4.8 from a reviewer is an opinion, and merging it into the place record would make an
+    #: opinion indistinguishable from a measurement everywhere downstream at once.
+    #:
+    #: The distinction from ``ingested_notes`` is provenance and date. A note is the traveller's
+    #: own paste and may be undated; a review came from a provider that is expected to say when
+    #: it was written, and ``MAX_AGE_SECONDS["review"]`` is applied to it.
+    reviews: list[Review] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

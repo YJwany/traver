@@ -105,6 +105,34 @@ class RouteProvider(Protocol):
 
 
 @runtime_checkable
+class ReviewProvider(Protocol):
+    """Supplies dated opinions about places the plan already contains.
+
+    Its own capability, and its own protocol, because a review is a different kind of fact
+    from the place it is about. A source can serve a place listing without serving reviews
+    (every source this deployment has does exactly that), and — the reason it is not simply
+    a ``rating`` field on :class:`Hotel` — reviews carry a *date*, which is what makes them
+    judgeable for recency. The user's requirement is 「只能用近期的评价」, and a bare rating
+    has nowhere to put that date.
+
+    Nothing in this repository implements it. That is the honest state, not an oversight:
+    no free source publishes guest ratings (OSM's ``stars`` is a self-declared
+    classification; 高德 lists rating among its ``absent_fields``), and the commercial
+    sources that do — Google Places, TripAdvisor, 大众点评 — all require a key and terms
+    acceptance. It exists so the capability matrix can say 「评价与评分：无来源，接入一个带发布
+    时间的来源即可」 instead of leaving a reader to infer it from a field that is always
+    ``None``. This is the same shape as ``RoomOfferProvider``: modelled, unserved, reported
+    as a gap with a reason.
+    """
+
+    name: str
+
+    async def search_reviews(
+        self, subject_ids: list[str], profile: TripProfile
+    ) -> ProviderResult: ...
+
+
+@runtime_checkable
 class WeatherProvider(Protocol):
     name: str
 
@@ -189,6 +217,11 @@ CAPABILITY_BY_METHOD: dict[str, type] = {
     "search_holidays": HolidayProvider,
     "enrich_attractions": ContentProvider,
     "resolve_places": PlaceResolverProvider,
+    # Modelled without an implementation, like ``search_room_offers`` was before a source
+    # could quote rates. The difference is that room offers are *unlockable* by supplying a
+    # hotel channel, whereas reviews need a source that publishes publication dates — see
+    # ``ReviewProvider`` and ``CAPABILITY_GAP_NOTES``.
+    "search_reviews": ReviewProvider,
 }
 
 #: Capabilities a provider implements structurally but does not actually serve.

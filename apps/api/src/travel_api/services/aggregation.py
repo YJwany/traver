@@ -10,6 +10,8 @@ from travel_api.domain.models import (
     TRAVEL_MODE_LABELS,
     Attraction,
     BudgetStrategyName,
+    ElementAge,
+    ElementAgeKind,
     HolidayCalendar,
     Hotel,
     HotelOffer,
@@ -19,6 +21,7 @@ from travel_api.domain.models import (
     ProviderResult,
     ResolvedPlace,
     Restaurant,
+    Review,
     RoutePoint,
     TravelMode,
     TripPreview,
@@ -501,6 +504,91 @@ async def build_preview(
         list(ingestions or []), hotels=hotels, restaurants=restaurants, attractions=attractions
     )
 
+    # Dated opinions about the entities just aggregated, from whatever review source is
+    # connected.
+    #
+    # Announced unconditionally, like the room-offer step above and for the same reason: the
+    # step list must have the same shape on every run, or a capability that was never asked
+    # about is indistinguishable from one that failed silently. No source in this deployment
+    # serves ``search_reviews``, so today this reports 「无来源，跳过」 — which is the truth, and is
+    # what makes plugging one in an action with a visible effect rather than a change to the
+    # settings page alone.
+    #
+    # Asked for by *entity* id, so a provider resolves its own place ids the way a room-rate
+    # provider resolves a hotel id. The three kinds share one call because a review provider
+    # answers about places, not about a category, and splitting it would ask the same source
+    # three times for one list.
+    review_subject_ids = [str(entity.id) for entity in (*hotels, *restaurants, *attractions)]
+    # One instant and one horizon for the whole step, so every review in the plan is aged
+    # against the same moment and the same rule — and so the count of over-age reviews matches
+    # the horizon the audit will apply moments later.
+    review_now = datetime.now(timezone.utc)
+    review_horizon = (freshness_service or FreshnessService()).policy.max_age_for("review")
+    # Reporting and dispatch are asked separately, following the rule in the registry: the
+    # message is about who *will* answer, the call is about who *can* be invoked.
+    reporting_review_sources = registry.serving_providers_for("search_reviews")
+    if not review_subject_ids:
+        review_step_note = "无可评价地点，跳过"
+    elif not reporting_review_sources:
+        review_step_note = "无来源，跳过"
+    else:
+        review_step_note = f"{len(review_subject_ids)} 个地点"
+    await reporter.step("search_reviews", review_step_note)
+    review_results = (
+        await _call_capability(registry, "search_reviews", review_subject_ids, profile)
+        if review_subject_ids
+        else []
+    )
+    # Only reviews about entities that are actually on this plan, the same guard enrichment
+    # gets and for the same reason: a provider must not be able to introduce a subject the
+    # plan does not contain. Without it, one response could attach an opinion to an arbitrary
+    # id and the list would read as if the plan held a place it does not — and the reader
+    # would have no way to tell, because a review carries the id rather than the name.
+    known_subjects = set(review_subject_ids)
+    reviews = []
+    aged_review_results = []
+    for result in review_results:
+        kept = [
+            item
+            for item in result.data
+            if isinstance(item, Review) and item.subject_id in known_subjects
+        ]
+        reviews.extend(kept)
+        # The set's own age is derived *here*, from the reviews that were actually accepted,
+        # rather than trusted from the provider — a deliberate departure from the Overpass path,
+        # where the provider has to compute it because only it can see the `meta` block. Here the
+        # dates are in the data the aggregate already holds, so a provider that forgot to
+        # summarise them, or that stamped a fresh `observed_at` on a batch of four-year-old
+        # reviews, would pass the freshness audit silently: `observed_at_basis` would be
+        # PROVIDER_REPORTED, `age_is_about_the_data` true, and the age checked against the batch
+        # instant instead of the reviews. That failure is invisible and optimistic, so it is
+        # exactly the one worth making structurally impossible. A provider cannot forget what it
+        # is not asked to do.
+        #
+        # `None` rather than a set of zeros when nothing is dated, so "no review says when it was
+        # written" is reported as age-unknown instead of as "everything was written this minute".
+        review_age = ElementAge.of(
+            (review.published_at for review in kept),
+            now=review_now,
+            horizon_seconds=review_horizon,
+            member_kind=ElementAgeKind.PUBLISHED,
+        )
+        if review_age is None:
+            aged_review_results.append(result)
+            continue
+        aged_review_results.append(
+            result.model_copy(
+                update={
+                    "source_references": [
+                        reference.model_copy(update={"element_age": review_age})
+                        for reference in result.source_references
+                    ]
+                }
+            )
+        )
+    review_results = aged_review_results
+    await reporter.finish_step()
+
     # Places the traveller's own notes named and our data sources did *not* have: exactly the
     # set that had nowhere to attach, and the reason the note could not be used.
     #
@@ -608,6 +696,7 @@ async def build_preview(
             *weather_results,
             *holiday_results,
             *enrichment_results,
+            *review_results,
         ]
         for ref in result.source_references
     ]
@@ -641,6 +730,11 @@ async def build_preview(
     typed_refs += [
         ("holiday", ref) for result in holiday_results for ref in result.source_references
     ]
+    # Reviews are paired with their own kind so the horizon that applies is the one for a
+    # *reviewer's* date rather than the place listing's. ``MAX_AGE_SECONDS["review"]`` exists
+    # precisely because the user's rule is about opinions being recent, and a review judged
+    # against the restaurant horizon would let a four-year-old score through as current.
+    typed_refs += [("review", ref) for result in review_results for ref in result.source_references]
     # Recomputed here rather than trusted from the provider, so the verdict is applied
     # by the current policy in one place instead of by whichever provider happened to
     # stamp the data.
@@ -685,6 +779,7 @@ async def build_preview(
         + [_audit_entry("search_holidays", result) for result in holiday_results]
         + [_audit_entry("enrich_attractions", result) for result in enrichment_results]
         + [_audit_entry("resolve_places", result) for result in place_results]
+        + [_audit_entry("search_reviews", result) for result in review_results]
     )
     preview = TripPreview(
         profile=profile,
@@ -705,6 +800,7 @@ async def build_preview(
         age_unknown_facts=age_unknown_facts,
         ingested_notes=ingested_notes,
         ingested_places=[place.model_dump(mode="json") for place in resolved_places],
+        reviews=reviews,
         generated_at=datetime.now(timezone.utc),
     )
     # Closed after the result exists, so a step never reports finished while its own

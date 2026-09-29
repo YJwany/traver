@@ -15,6 +15,7 @@ import pytest
 from travel_api.domain.models import (
     Attraction,
     DataDomain,
+    ElementAgeKind,
     Hotel,
     ObservationBasis,
     Pace,
@@ -862,6 +863,11 @@ async def test_the_snapshot_time_is_not_the_age_of_the_elements():
     # finding the audit now raises.
     assert element_age.older_than_horizon == 3
     assert element_age.horizon_seconds == 86400
+    # The members are OSM elements, which are *edited*. The report's wording follows this field,
+    # and the statistic is shared with the review path — so a default that drifted, or a copy of
+    # this call that named the wrong kind, would describe OSM records as though they had been
+    # written once and never touched, which is false for a wiki.
+    assert element_age.member_kind is ElementAgeKind.EDITED
     await http.aclose()
 
 

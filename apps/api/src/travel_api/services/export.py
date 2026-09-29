@@ -65,6 +65,7 @@ from travel_api.domain.models import (
     PACE_LABELS,
     PLACE_STATUS_LABELS,
     TRAVEL_MODE_LABELS,
+    ElementAgeKind,
     SourceReference,
     Trip,
 )
@@ -429,10 +430,18 @@ def _element_age_lines(references: list[SourceReference]) -> list[str]:
     for reference in aged:
         element_age = reference.element_age
         assert element_age is not None  # narrowed by the filter above
+        # The verb depends on what the members are: an OSM element is last *edited*, a review is
+        # *written* once. Saying "最后修改于" about a review would invent an edit that never
+        # happened.
+        made = (
+            "最早一条最后修改于"
+            if element_age.member_kind is ElementAgeKind.EDITED
+            else "最早一条写于"
+        )
         out.append(
             f"- `{reference.source}`（{reference.source_id}）共 {element_age.count} 条："
             f"中位 **{element_age.median_days} 天**，"
-            f"最早一条最后修改于 **{element_age.oldest_at.date().isoformat()}**"
+            f"{made} **{element_age.oldest_at.date().isoformat()}**"
             f"（{round(element_age.oldest_seconds / 86400)} 天前）；"
             f"其中 {element_age.older_than_horizon} 条已超出该类事实可接受的 "
             f"{_format_age(element_age.horizon_seconds)}。"

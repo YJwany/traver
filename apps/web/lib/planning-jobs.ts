@@ -88,6 +88,10 @@ export const STEP_LABELS: Record<string, string> = {
   room_offers: "查询房型与报价",
   enrich_attractions: "补充景点简介",
   resolve_places: "定位笔记里提到的地点",
+  // Announced even when no source serves it, so the step list keeps the same shape on every
+  // run. The label therefore has to be readable in the "skipped, no source" case too: 「查询
+  // 近期评价」 says what would happen, and the step's own detail says 无来源，跳过.
+  search_reviews: "查询近期评价",
   calculate_routes: "计算路线耗时",
   build_itinerary: "生成每日行程与预算",
   collect_health: "检查数据源状态",

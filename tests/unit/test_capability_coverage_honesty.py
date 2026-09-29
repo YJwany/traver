@@ -164,14 +164,68 @@ def test_the_gap_is_named_and_explained():
     registered = [provider.name for provider in _free_providers()]
     gaps = capability_gaps(registered, _all_capabilities())
 
-    assert [gap["capability"] for gap in gaps] == ["search_room_offers"]
-    gap = gaps[0]
-    assert gap["label"]
+    # Two gaps, and both are real for different reasons: no source quotes a room rate, and no
+    # source publishes a dated guest review. Neither is a configuration problem, so both
+    # belong here rather than in the unlock hints.
+    assert [gap["capability"] for gap in gaps] == ["search_room_offers", "search_reviews"]
+
+    hotel_gap = next(gap for gap in gaps if gap["capability"] == "search_room_offers")
+    assert hotel_gap["label"]
     # The note must say what happens *instead*, so the reader connects it to the estimated
     # accommodation line they will see in the budget rather than hunting for a bug.
-    assert "估算" in gap["note"]
-    assert "未接入" in gap["note"], (
+    assert "估算" in hotel_gap["note"]
+    assert "未接入" in hotel_gap["note"], (
         "the note must be about what is integrated, not an impossibility"
+    )
+
+
+def test_the_reviews_gap_explains_the_always_empty_rating_fields():
+    """The gap note has to connect the missing capability to the field a reader is staring at.
+
+    `Hotel.rating` and `Restaurant.rating` exist and are always `None`. Without a name for the
+    missing capability, `None` reads as "not applicable to this place" when the truth is "no
+    source publishes guest ratings" — and the premise of this tool is that a reader can tell
+    which fields a plugged-in source would fill.
+    """
+    registered = [provider.name for provider in _free_providers()]
+    gaps = capability_gaps(registered, _all_capabilities())
+    gap = next(item for item in gaps if item["capability"] == "search_reviews")
+
+    assert gap["label"] == "评价与评分"
+    note = gap["note"]
+    # It must name the sources a reader would otherwise try, and say why each fails, or the
+    # note reads as "nobody has this" rather than "here is what to connect".
+    assert "OpenStreetMap" in note and "stars" in note
+    assert "高德" in note and "rating" in note
+    # And it must name what would actually fill it.
+    assert "Google Places" in note or "TripAdvisor" in note
+
+    # The recency requirement is the reason this is a *capability* rather than a `rating`
+    # float: a score without a date cannot be judged, and the user's rule is about dates.
+    assert "发布时间" in note, (
+        "the note must require a publication date, because a score without one cannot satisfy "
+        "「只能用近期的评价」"
+    )
+
+
+def test_the_review_horizon_exists_and_is_not_the_tightest():
+    """The 时效性 number for reviews, pinned so it cannot be dropped or quietly tightened.
+
+    Reviews are the one horizon the user named in advance. The assertion is two-sided on
+    purpose: it must exist (so an old review is reported rather than trusted), and it must be
+    far looser than a weather or route horizon (so a good restaurant in a small town, whose
+    newest review is a year old, is not flagged — a warning that fires on ordinary data is one
+    a reader learns to ignore).
+    """
+    from travel_api.services.freshness import MAX_AGE_SECONDS
+
+    assert "review" in MAX_AGE_SECONDS, (
+        "reviews have no horizon, so a four-year-old opinion is presented as current"
+    )
+    review_horizon = MAX_AGE_SECONDS["review"]
+    assert review_horizon > MAX_AGE_SECONDS["restaurant"] * 30
+    assert review_horizon < 5 * 365 * 86400, (
+        "a five-year horizon would let 「几年前那种」 through, which is the requirement"
     )
 
 

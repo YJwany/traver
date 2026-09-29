@@ -39,6 +39,10 @@ CAPABILITY_LABELS: dict[str, str] = {
     "search_holidays": "节假日",
     "enrich_attractions": "景点简介",
     "resolve_places": "地名定位",
+    # Named 「评价与评分」 rather than 「评价」 because the rating is what a reader sees in the
+    # data (`Hotel.rating`, always `None`) and the review is what produces it. A label naming
+    # only the prose would not explain the empty score.
+    "search_reviews": "评价与评分",
 }
 
 #: The parts a capability decomposes into, for capabilities where one provider
@@ -684,6 +688,15 @@ CAPABILITY_GAP_NOTES: dict[str, str] = {
         "房型与实时房价只存在于商业酒店渠道（携程 / Booking / Expedia 的开放接口，或高德的酒店开放平台），"
         "本工具尚未接入任何一家。因此预算里的住宿部分是估算额度，并已标注为估算——"
         "它不会拿一个编造的房价冒充实时报价。"
+    ),
+    "search_reviews": (
+        "评价与评分需要「带发布时间的意见」，本工具尚未接入任何这样的来源。"
+        "已有的免费来源都不提供：OpenStreetMap 的 stars 是自我声明的星级分类而不是住客评分，"
+        "高德把 rating / review_count 明确列在 absent_fields 里。"
+        "因此酒店与餐厅的评分字段始终为空，而不是默认值。"
+        "要补上需要接入一个提供评分与发布时间的来源（Google Places / TripAdvisor / 大众点评的开放接口）。"
+        "注意：只有分数没有日期是不够的——攻略面向未来，一条几年前的「4.8 分」和上个月的「4.8 分」"
+        "是同一个数字、两件不同的事，所以接入时必须同时提供发布时间。"
     ),
 }
 

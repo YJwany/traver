@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 
-from travel_api.domain.models import SourceReference
+from travel_api.domain.models import ElementAgeKind, SourceReference
 
 
 class FreshnessStatus(StrEnum):
@@ -35,6 +35,24 @@ MAX_AGE_SECONDS: dict[str, int] = {
     "restaurant": 86400,
     "hotel": 86400,
     "attraction": 86400,
+    # Eighteen months, and the number is the *reviewer's* date rather than a cache TTL.
+    #
+    # This is the one horizon in this table that exists because the user asked for it in so
+    # many words: 「只能用近期的评价……不能是那种几年前那种」. It is not the same kind of fact as
+    # the rows above. A restaurant listing being a day old is a statement about our copy; a
+    # review being four years old is a statement about the *world* — the reviewer is
+    # describing a place as it was before the last renovation, the last change of owner, or
+    # the last two years of a neighbourhood. So the horizon is loose in absolute terms and
+    # still does the work: it separates "people are still going and still writing about it"
+    # from "this is an old memory that may describe somewhere that no longer exists".
+    #
+    # Not tighter, because reviews are sparse: a genuinely good restaurant in a small town may
+    # have nothing newer, and a horizon of a few months would flag almost every review of
+    # almost every place outside a capital, which is how a reader learns to ignore warnings.
+    # Undated reviews are the harder case and are *not* covered by this number: they are
+    # reported as age-unknown through the ``SOURCE_SILENT`` path, because assuming they are
+    # recent is exactly the mistake this horizon exists to prevent.
+    "review": 18 * 30 * 86400,
     # Deliberately absent: ``user_content``.
     #
     # A note the traveller supplied is judged by *its own* stated publication date, and
@@ -265,6 +283,11 @@ class FreshnessService:
             if reference.observed_at_basis.age_is_about_the_data
             else f"该来源未提供整批数据的时间（{snapshot.isoformat()} 是我们抓取的时刻）"
         )
+        # The verb depends on what the members are. An OSM element is last *edited*; a review is
+        # *written* once and never modified, so describing it as having been modified on some
+        # later date would invent an event — and this sentence is stored with the plan and read
+        # later, so it cannot lean on the reader knowing which capability produced it.
+        made = "最后修改于" if element_age.member_kind is ElementAgeKind.EDITED else "写于"
         return {
             **common,
             "reason": "too_old",
@@ -273,7 +296,7 @@ class FreshnessService:
                 f"{batch}描述的是整批数据，但其中 "
                 f"{element_age.older_than_horizon} / {element_age.count} 条自身已超过"
                 f"该类事实可接受的 {horizon} 秒：中位 {element_age.median_days} 天、"
-                f"最早一条最后修改于 {element_age.oldest_at.date().isoformat()}"
+                f"最早一条{made} {element_age.oldest_at.date().isoformat()}"
                 f"（{round(element_age.oldest_seconds / 86400)} 天前）。"
                 "单条时间戳无法表达这种分布，因此单独列出"
             ),

@@ -302,6 +302,20 @@ const CATALOG: Catalog = {
       missing_aspects: [],
       providers: ["openstreetmap-places"],
     },
+    // The second uncovered row, and it is uncovered for a different reason than rates: the
+    // capability exists in the registry with a protocol behind it, and *no source at all*
+    // publishes a dated guest score. It was added to the model after the fixture above was
+    // written, and `test_the_matrix_fixture_lists_every_capability_the_server_sends` caught the
+    // drift immediately — which is the guard doing exactly its job.
+    {
+      capability: "search_reviews",
+      label: "评价与评分",
+      covered: false,
+      complete: false,
+      aspects: [],
+      missing_aspects: [],
+      providers: [],
+    },
   ],
   registered: [
     "openstreetmap",
@@ -314,12 +328,18 @@ const CATALOG: Catalog = {
   // Room rates are genuinely uncovered: no keyless source can produce one, and no
   // catalogue entry claims to. The fixture mirrors the real API so the render path is
   // exercised rather than assumed.
-  uncovered_capabilities: ["search_room_offers"],
+  uncovered_capabilities: ["search_room_offers", "search_reviews"],
   capability_gaps: [
     {
       capability: "search_room_offers",
       label: "房型与报价",
       note: "房型与实时房价只存在于商业酒店渠道（携程 / Booking 的开放接口），本工具尚未接入任何一家。因此预算里的住宿部分是估算额度。",
+      closable_by: "source",
+    },
+    {
+      capability: "search_reviews",
+      label: "评价与评分",
+      note: "评价与评分需要「带发布时间的意见」，本工具尚未接入任何这样的来源。因此酒店与餐厅的评分字段始终为空，而不是默认值。",
       closable_by: "source",
     },
   ],
@@ -349,6 +369,24 @@ const CATALOG: Catalog = {
     owner_only_permissions: false,
   },
 };
+
+/**
+ * The `<li>` entries of the *uncovered capability* list.
+ *
+ * Found by the list's own sentence rather than by a class, because the panel renders two
+ * `ul.note-list` elements and both can carry `vault-note-warn` (the unlock hints below take
+ * their tone from data). A class-based selector quietly mixes them, which is how adding a
+ * second uncovered capability first surfaced here as a length mismatch instead of as a
+ * missing explanation.
+ */
+function gapItems(container: HTMLElement): HTMLElement[] {
+  const lists = Array.from(container.querySelectorAll("ul.note-list"));
+  const gapList = lists.find((list) =>
+    list.textContent?.includes("没有任何已接入的来源能提供它"),
+  );
+  expect(gapList).toBeDefined();
+  return Array.from(gapList!.querySelectorAll("li"));
+}
 
 function stubFetch(payload: unknown, status = 200) {
   const fetchMock = vi.fn().mockResolvedValue({
@@ -390,8 +428,8 @@ describe("ProviderCatalog", () => {
     render(<ProviderCatalog apiUrl="http://api.test" />);
 
     expect(await screen.findByText("酒店搜索")).toBeInTheDocument();
-    // Seven of nine are complete; routing is partially covered and room rates are not covered
-    // at all, and the headline must not claim otherwise.
+    // Seven of ten are complete; routing is partially covered and room rates and reviews are not
+    // covered at all, and the headline must not claim otherwise.
     //
     // This assertion used to read "2 / 3 完整可用", which pinned the fixture's incompleteness
     // rather than the component's behaviour: the fixture listed three capabilities while the
@@ -399,7 +437,8 @@ describe("ProviderCatalog", () => {
     // row cannot make it wrong — the guard against a *stale* matrix is the set comparison in
     // the test below, and the guard against the headline lying is the separate assertion on
     // the partial-coverage sentence.
-    expect(screen.getByText("7 / 9 完整可用")).toBeInTheDocument();
+    const complete = CATALOG.capabilities.filter((row) => row.complete).length;
+    expect(screen.getByText(`${complete} / ${CATALOG.capabilities.length} 完整可用`)).toBeInTheDocument();
     expect(screen.getByText(/另有 1 项只覆盖了一部分/)).toBeInTheDocument();
   });
 
@@ -414,13 +453,42 @@ describe("ProviderCatalog", () => {
     // always returns an empty list. A catalogue must not advertise a capability that
     // returns nothing, so the gap has to appear at all.
     stubFetch(CATALOG);
-    render(<ProviderCatalog apiUrl="http://api.test" />);
+    const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
 
     expect(await screen.findByText("房型与报价", { selector: "strong" })).toBeInTheDocument();
     // And it says what happens instead, so the reader connects it to the estimated
     // accommodation line in the budget rather than hunting for a bug.
-    expect(screen.getByText(/没有任何已接入的来源能提供它/)).toBeInTheDocument();
-    expect(screen.getByText(/估算额度/)).toBeInTheDocument();
+    const rates = gapItems(container).find((node) => node.textContent?.includes("房型与报价"));
+    expect(rates).toBeDefined();
+    expect(rates!.textContent).toMatch(/没有任何已接入的来源能提供它/);
+    expect(rates!.textContent).toMatch(/估算额度/);
+  });
+
+  it("explains each uncovered capability in its own entry, not once for all of them", async () => {
+    // Every gap gets its own reason. A single shared paragraph would be wrong the moment two
+    // capabilities are missing for different reasons, which is the case here: room rates need a
+    // commercial hotel channel, reviews need a source that publishes a score *with a date*.
+    stubFetch(CATALOG);
+    const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    await screen.findByText("房型与报价", { selector: "strong" });
+    const items = gapItems(container);
+    // The field is optional on the wire, so tsc is right to ask; this test's whole point is
+    // that it is present and populated.
+    const gaps = CATALOG.capability_gaps ?? [];
+    expect(gaps.length).toBeGreaterThan(1);
+    expect(items).toHaveLength(gaps.length);
+
+    const reviews = items.find((node) => node.textContent?.includes("评价与评分"));
+    expect(reviews).toBeDefined();
+    // The review note has to connect the missing capability to the always-`None` rating field,
+    // or the reader sees an empty score and concludes the place has no rating rather than that
+    // no source was plugged in.
+    expect(reviews!.textContent).toMatch(/评分字段始终为空/);
+
+    // And no two gaps share their explanation, which is the failure a single note would produce.
+    const notes = gaps.map((gap) => gap.note);
+    expect(new Set(notes).size).toBe(notes.length);
   });
 
   it("does not show a gap panel when there is nothing missing", async () => {
@@ -439,7 +507,13 @@ describe("ProviderCatalog", () => {
     stubFetch(withoutGaps);
     render(<ProviderCatalog apiUrl="http://api.test" />);
 
-    expect(await screen.findByText(/1 项能力完全没有来源/)).toBeInTheDocument();
+    // Derived from the list the component actually counts, so adding an uncovered capability
+    // cannot make this assertion describe a different world from the one being rendered.
+    expect(
+      await screen.findByText(
+        new RegExp(`${CATALOG.uncovered_capabilities.length} 项能力完全没有来源`),
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/没有任何已接入的来源能提供它/)).not.toBeInTheDocument();
   });
 

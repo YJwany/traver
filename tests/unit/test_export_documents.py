@@ -32,6 +32,7 @@ from travel_api.domain.models import (
     Coordinates,
     DataDomain,
     ElementAge,
+    ElementAgeKind,
     Itinerary,
     ItineraryDay,
     ItineraryItem,
@@ -306,6 +307,48 @@ def test_the_export_says_when_over_age_entries_were_kept_rather_than_dropped():
     markdown = to_markdown(_trip(preview=preview), generated_at=GENERATED)
     assert "未从计划中删除" in markdown
     assert "可能已经过时" in markdown
+
+
+def test_a_review_set_is_described_as_written_not_as_modified():
+    """The verb has to match the kind of record, because the sentence outlives its context.
+
+    A review is written once and never modified. Printing 「最早一条最后修改于」 about one
+    invents an edit that never happened — the sentence describes a later revision of an
+    opinion, which is a different and false claim about the record. The export is read on its
+    own, with no capability name nearby to disambiguate, so the wording has to carry the
+    distinction rather than rely on the reader knowing where the row came from.
+    """
+    reference = _aged_reference()
+    assert reference.element_age is not None
+    reference = reference.model_copy(
+        update={
+            "element_age": reference.element_age.model_copy(
+                update={"member_kind": ElementAgeKind.PUBLISHED}
+            )
+        }
+    )
+    markdown = to_markdown(_trip(preview=_preview(references=[reference])), generated_at=GENERATED)
+
+    assert "最早一条写于" in markdown, (
+        "a review's date is reported as a modification, which no reviewer performed"
+    )
+    assert "最后修改于" not in markdown, (
+        "the OSM wording leaked into a review row: reviews are not edited"
+    )
+
+
+def test_an_osm_element_set_is_still_described_as_edited():
+    """The other side of the same discrimination, so defaulting to one verb cannot pass.
+
+    Without this, a fix that printed 「写于」 for everything would satisfy the review test while
+    silently changing what the OSM section claims about its own records.
+    """
+    markdown = to_markdown(
+        _trip(preview=_preview(references=[_aged_reference()])), generated_at=GENERATED
+    )
+
+    assert "最早一条最后修改于" in markdown
+    assert "写于" not in markdown
 
 
 def test_a_source_whose_members_are_all_current_still_prints_the_distribution():
