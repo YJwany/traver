@@ -14,6 +14,7 @@ import { AgeUnknownPanel } from "../../components/freshness-coverage";
 import { ExportPanel } from "../../components/export-panel";
 import { IngestedPlacesPanel } from "../../components/ingested-places";
 import { unmatchedMentionWording, type ResolvedPlace } from "../../../lib/ingested-places";
+import { placePins } from "../../../lib/map";
 import { PACE_LABELS, TRAVEL_MODE_LABELS } from "../../components/plan-form";
 
 type AnyRecord = Record<string, any>;
@@ -57,11 +58,21 @@ function MapPanel({ trip }: { trip: Trip }) {
     ...(trip.preview?.restaurants ?? []).slice(0, 6).map((item: AnyRecord) => ({ ...item, pinType: "food" })),
     ...(trip.preview?.attractions ?? []).slice(0, 6).map((item: AnyRecord) => ({ ...item, pinType: "attraction" })),
   ];
-  const points = entities.map((item) => item.location?.coordinates).filter(Boolean);
-  const lats = points.map((point: AnyRecord) => Number(point.latitude)); const lons = points.map((point: AnyRecord) => Number(point.longitude));
-  const minLat = Math.min(...lats, 30.6), maxLat = Math.max(...lats, 30.6), minLon = Math.min(...lons, 104.0), maxLon = Math.max(...lons, 104.0);
-  const position = (item: AnyRecord): CSSProperties => { const point = item.location.coordinates; const x = 12 + ((Number(point.longitude) - minLon) / Math.max(maxLon - minLon, 0.001)) * 76; const y = 82 - ((Number(point.latitude) - minLat) / Math.max(maxLat - minLat, 0.001)) * 66; return { left: `${Math.min(92, Math.max(8, x))}%`, top: `${Math.min(88, Math.max(12, y))}%` }; };
-  return <div className="map"><div className="map-grid" /><div className="map-label">{trip.profile.destination} · 坐标视图</div>{entities.map((item, index) => <span className={`pin ${item.pinType}`} style={position(item)} title={item.canonical_name} key={`${item.id}-${index}`} />)}<div className="map-legend"><span><i className="legend-dot" style={{ background: "var(--blue)" }} />酒店</span><span><i className="legend-dot" style={{ background: "#e07b13" }} />餐厅</span><span><i className="legend-dot" style={{ background: "#8d57d8" }} />景点</span></div></div>;
+  // The box is the trip's own points and nothing else. It used to be seeded with two literals,
+  // 30.6 and 104.0 — 成都 — so the box was the union of the trip and one fixed city. A 成都 trip
+  // looked right, which is why it survived; every other destination was drawn as a smear in the
+  // bottom-right corner. The rule now lives in lib/map.ts, where it has tests.
+  const placements = placePins(entities.map((item) => item.location?.coordinates));
+  const drawable = entities.filter((_, index) => placements[index] !== null);
+  if (!drawable.length) {
+    // An empty panel, not a default box: a default box would claim a location we do not have.
+    return <div className="map"><div className="map-grid" /><div className="map-label">{trip.profile.destination} · 坐标视图</div><div className="empty">这次计划里没有可用的坐标，无法给出位置示意图。</div></div>;
+  }
+  const position = (index: number): CSSProperties => {
+    const placement = placements[index]!;
+    return { left: `${placement.left}%`, top: `${placement.top}%` };
+  };
+  return <div className="map"><div className="map-grid" /><div className="map-label">{trip.profile.destination} · 示意图（非按比例）</div>{entities.map((item, index) => placements[index] === null ? null : <span className={`pin ${item.pinType}`} style={position(index)} title={item.canonical_name} key={`${item.id}-${index}`} />)}<div className="map-legend"><span><i className="legend-dot" style={{ background: "var(--blue)" }} />酒店</span><span><i className="legend-dot" style={{ background: "#e07b13" }} />餐厅</span><span><i className="legend-dot" style={{ background: "#8d57d8" }} />景点</span></div></div>;
 }
 
 function aqiLabel(index: number | null | undefined): string | null {
