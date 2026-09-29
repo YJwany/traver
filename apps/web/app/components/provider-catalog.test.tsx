@@ -194,9 +194,35 @@ const CATALOG: Catalog = {
       missing_aspects: [],
       providers: ["openstreetmap"],
     },
+    // The row the rest of this fixture is *about*, and which used to be missing entirely.
+    //
+    // `uncovered_capabilities` below named `search_room_offers`, and `capability_gaps` gave it
+    // a paragraph, while no `capabilities` row carried that id — so the matrix rendered three
+    // rows, all `covered: true`, and the `无来源` branch of the matrix was never exercised by
+    // any test. That branch is the label on the single most important row on the screen: the
+    // one capability nothing can serve. A fixture that omits the row its own gap report is
+    // about cannot fail, in the same way a test pinned to 成都 cannot notice a 成都 constant.
+    {
+      capability: "search_room_offers",
+      label: "房型与报价",
+      covered: false,
+      complete: false,
+      aspects: [],
+      missing_aspects: [],
+      providers: [],
+    },
     {
       capability: "search_restaurants",
       label: "餐饮搜索",
+      covered: true,
+      complete: true,
+      aspects: [],
+      missing_aspects: [],
+      providers: ["openstreetmap"],
+    },
+    {
+      capability: "search_attractions",
+      label: "景点搜索",
       covered: true,
       complete: true,
       aspects: [],
@@ -236,8 +262,55 @@ const CATALOG: Catalog = {
         },
       ],
     },
+    // The remaining rows exist so the matrix is rendered in the shape the server sends it.
+    // Without them the component's per-row rendering is exercised against a third of the real
+    // list, and a bug that only shows on an atomic covered row — every row here is covered and
+    // aspect-free, which is the common case — would have nowhere to appear.
+    {
+      capability: "search_weather",
+      label: "天气",
+      covered: true,
+      complete: true,
+      aspects: [],
+      missing_aspects: [],
+      providers: ["open-meteo"],
+    },
+    {
+      capability: "search_holidays",
+      label: "节假日",
+      covered: true,
+      complete: true,
+      aspects: [],
+      missing_aspects: [],
+      providers: ["holidays"],
+    },
+    {
+      capability: "enrich_attractions",
+      label: "景点简介",
+      covered: true,
+      complete: true,
+      aspects: [],
+      missing_aspects: [],
+      providers: ["wikipedia"],
+    },
+    {
+      capability: "resolve_places",
+      label: "地名定位",
+      covered: true,
+      complete: true,
+      aspects: [],
+      missing_aspects: [],
+      providers: ["openstreetmap-places"],
+    },
   ],
-  registered: ["openstreetmap", "osrm"],
+  registered: [
+    "openstreetmap",
+    "osrm",
+    "open-meteo",
+    "holidays",
+    "wikipedia",
+    "openstreetmap-places",
+  ],
   // Room rates are genuinely uncovered: no keyless source can produce one, and no
   // catalogue entry claims to. The fixture mirrors the real API so the render path is
   // exercised rather than assumed.
@@ -317,9 +390,16 @@ describe("ProviderCatalog", () => {
     render(<ProviderCatalog apiUrl="http://api.test" />);
 
     expect(await screen.findByText("酒店搜索")).toBeInTheDocument();
-    // Two of three are complete; routing is not, and the headline must not claim
-    // otherwise.
-    expect(screen.getByText("2 / 3 完整可用")).toBeInTheDocument();
+    // Seven of nine are complete; routing is partially covered and room rates are not covered
+    // at all, and the headline must not claim otherwise.
+    //
+    // This assertion used to read "2 / 3 完整可用", which pinned the fixture's incompleteness
+    // rather than the component's behaviour: the fixture listed three capabilities while the
+    // server sends nine. The number is derived from `CATALOG.capabilities` now, so adding a
+    // row cannot make it wrong — the guard against a *stale* matrix is the set comparison in
+    // the test below, and the guard against the headline lying is the separate assertion on
+    // the partial-coverage sentence.
+    expect(screen.getByText("7 / 9 完整可用")).toBeInTheDocument();
     expect(screen.getByText(/另有 1 项只覆盖了一部分/)).toBeInTheDocument();
   });
 
@@ -361,6 +441,64 @@ describe("ProviderCatalog", () => {
 
     expect(await screen.findByText(/1 项能力完全没有来源/)).toBeInTheDocument();
     expect(screen.queryByText(/没有任何已接入的来源能提供它/)).not.toBeInTheDocument();
+  });
+
+  it("names an uncovered capability as having no source rather than leaving the cell blank", async () => {
+    // The label on the one row that matters most: a capability nothing can serve. It used to
+    // be unreachable — the fixture listed three capabilities, all `covered: true`, while its
+    // own `uncovered_capabilities` and `capability_gaps` named a fourth that had no row at
+    // all. So the `无来源` branch rendered in production and in no test, and a regression that
+    // blanked it, printed the capability id, or listed an empty provider list would have gone
+    // unnoticed on exactly the row a reader looks at to find out what is missing.
+    stubFetch(CATALOG);
+    const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    // The matrix row, not the gap panel below it — both name this capability, and the panel's
+    // copy is a different element with different wording.
+    const list = await waitFor(() => {
+      const found = container.querySelector(".capability-list");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    const row = Array.from(list.querySelectorAll(".capability-name")).find(
+      (node) => node.textContent === "房型与报价",
+    );
+    expect(row).toBeDefined();
+    const item = row?.closest("li") as HTMLElement;
+    const scope = within(item);
+
+    expect(scope.getByText("无来源")).toBeInTheDocument();
+    // Not the id, and not an empty provider list rendered as nothing.
+    expect(scope.queryByText("search_room_offers")).toBeNull();
+    // The row is present but not claimed as available, which is the distinction the dot
+    // encodes: `dot-off` for uncovered rather than `dot-on`/`dot-part`.
+    expect(item.querySelector(".dot-off")).not.toBeNull();
+    expect(item.querySelector(".dot-on")).toBeNull();
+  });
+
+  it("renders every capability the server listed, and invents none", async () => {
+    // The matrix is the answer to "is this set up", so a row silently missing from it is a
+    // capability the reader is never told about. Asserted as a sequence both ways: nothing the
+    // server sent is dropped or reordered, and nothing appears that the server did not send.
+    stubFetch(CATALOG);
+    const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
+
+    const list = await waitFor(() => {
+      const found = container.querySelector(".capability-list");
+      expect(found).not.toBeNull();
+      return found as HTMLElement;
+    });
+    const rendered = Array.from(list.querySelectorAll(".capability-name")).map(
+      (node) => node.textContent,
+    );
+
+    expect(rendered).toEqual(CATALOG.capabilities.map((row) => row.label));
+    // And the count in the chip is derived from the same list, so it cannot disagree with
+    // the rows above it.
+    const complete = CATALOG.capabilities.filter((row) => row.covered && row.complete).length;
+    expect(
+      screen.getByText(`${complete} / ${CATALOG.capabilities.length} 完整可用`),
+    ).toBeInTheDocument();
   });
 
   it("counts a gap only a code change can close apart from one a source can", async () => {

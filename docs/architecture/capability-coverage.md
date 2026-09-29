@@ -124,6 +124,23 @@ assert payload["uncovered_capabilities"] == [], (
 
 验证方式是变异：把 status 改回 `planned`、从 capabilities 里去掉 `search_weather`、给 aspects 加回 `cycling`、从 aspects 里去掉 `transit` —— 四种都会失败，且报错信息直接说明差在哪个字段。
 
+### 同一个漂移的另一半：矩阵本身只有三分之一
+
+修高德那一条时发现了同一处的第二个实例，而且更难发现，因为它不涉及任何会说谎的文案——只是**少了行**。
+
+`CATALOG.capabilities` 只有三条（`search_hotels`、`search_restaurants`、`calculate_routes`），全部 `covered: true`；而同一份 fixture 的 `uncovered_capabilities` 和 `capability_gaps` 都在讲第四条 `search_room_offers`——**一条矩阵里根本不存在的行**。服务端实际发的是九条。
+
+于是：
+
+- 矩阵里 `无来源` 那个分支（`{row.covered ? row.providers.join("、") : "无来源"}`）在生产里会渲染，在测试里**从未渲染过**——而它标的正是全屏最重要的一行：唯一一个谁都提供不了的能力，也是读者去矩阵里专门要找的那一行。它被写成空字符串、写成 capability id、或把空 provider 列表渲染成一片空白，测试都不会响；
+- 一份**自相矛盾**的 fixture（缺口报告指着一行不存在的能力）让失败无法解释：数字对不上时，分不清是组件的错还是 fixture 的错。
+
+现在矩阵补齐到服务端真实发的九条（顺序也一致），并加了三条渲染测试：未覆盖行的来源格必须写 `无来源` 而不是留白、它的圆点必须是 `dot-off`、以及**矩阵渲染出的行序必须与 `CATALOG.capabilities` 逐项相等**（既不许少，也不许多）。同时 `test_the_matrix_fixture_lists_every_capability_the_server_sends` 把这份 fixture 的 `(capability, label)` 序列直接对着真实响应比较，并额外检查 fixture 自己的缺口报告只引用存在的行。
+
+顺带修掉一条**把 fixture 的不足当成组件行为**钉住的断言：`expect(screen.getByText("2 / 3 完整可用"))`。3 是 fixture 少写行造成的，不是组件的行为；现在它读 `CATALOG.capabilities` 自己算，补行不会再让它变错，而"标题不许说谎"由另一条关于「只覆盖一部分」的断言守着。
+
+变异验证：把来源格改成空字符串、把未覆盖行画成已覆盖的圆点、让矩阵少渲染最后一行、以及重新删掉 `search_room_offers` 那一行 / 删掉 `search_weather` 那一行——全部被抓。
+
 ## 这句话是不是真的
 
 上面那条 note 断言了行为：**预算里的住宿是估算额度，并且标了是估算**。这是关于行为的断言，所以它被验证而不是被相信：

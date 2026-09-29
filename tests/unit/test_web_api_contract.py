@@ -707,3 +707,77 @@ def test_the_settings_page_fixture_matches_the_source_it_is_supposed_to_describe
         "高德 must not declare cycling: TravelMode cannot request it, so a key would not "
         "unlock it and the settings page would promise something unreachable"
     )
+
+
+def test_the_matrix_fixture_lists_every_capability_the_server_sends(tmp_path):
+    """The other half of the same drift, and the one that hid the most important row.
+
+    ``CATALOG.capabilities`` used to hold three entries, all ``covered: true``, while
+    ``CATALOG.uncovered_capabilities`` and ``CATALOG.capability_gaps`` named a fourth —
+    ``search_room_offers`` — that had no row at all. The server sends nine.
+
+    Two things followed, and neither was visible:
+
+      * the ``无来源`` branch of the matrix never rendered in any test, and that branch is the
+        label on the one capability nothing can serve — the row a reader goes to the matrix to
+        find;
+      * a fixture that is internally inconsistent (a gap naming a row that does not exist) is a
+        fixture whose failures cannot be interpreted: a wrong count could be the component's
+        fault or the fixture's, and nothing distinguished them.
+
+    So the comparison is against the live response rather than against the fixture's own idea
+    of itself. Capability ids and labels both, in order, because the matrix is a list the user
+    reads top to bottom.
+    """
+    from fastapi.testclient import TestClient
+    from travel_api.config import Settings
+    from travel_api.main import create_app
+
+    source = CATALOG_TEST.read_text(encoding="utf-8")
+    # The `capabilities: [...]` block of `CATALOG` (the shared fixture), which ends where
+    # `registered:` begins.
+    start = source.index("  capabilities: [")
+    end = source.index("  registered: [", start)
+    block = source[start:end]
+
+    # Each row is `capability: "<id>"` followed by `label: "<label>"`, in that order.
+    fixture_rows = re.findall(
+        r'capability:\s*"([a-z_]+)",\s*\n\s*label:\s*"([^"]+)"',
+        block,
+    )
+    assert fixture_rows, "could not parse any capability rows out of the fixture"
+
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                database_url=f"sqlite:///{tmp_path / 'matrix-contract.db'}",
+                auto_create_schema=True,
+                auth_enabled=False,
+                free_providers_enabled=True,
+                mock_provider_enabled=False,
+                provider_fixture_dir=None,
+            )
+        )
+    ) as client:
+        response = client.get("/api/v1/providers/catalog")
+    assert response.status_code == 200, response.text
+    real_rows = [(row["capability"], row["label"]) for row in response.json()["capabilities"]]
+
+    assert fixture_rows == real_rows, (
+        "the settings-page fixture's capability matrix has drifted from what the server "
+        "sends. A row missing here is a capability the reading tests never render.\n"
+        f"  fixture only: {[r for r in fixture_rows if r not in real_rows]}\n"
+        f"  server only:  {[r for r in real_rows if r not in fixture_rows]}"
+    )
+
+    # And the fixture's own gap report must name rows that exist in it. This is the internal
+    # inconsistency that made the drift invisible rather than merely stale.
+    fixture_ids = {capability for capability, _label in fixture_rows}
+    uncovered = _ts_string_array(block + source[end:], "uncovered_capabilities")
+    assert uncovered, "the fixture reports no uncovered capability, so this checks nothing"
+    missing_rows = [item for item in uncovered if item not in fixture_ids]
+    assert not missing_rows, (
+        f"the fixture names {missing_rows} as uncovered but gives them no matrix row, so the "
+        "panel and the matrix disagree about what exists"
+    )
