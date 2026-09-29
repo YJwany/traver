@@ -438,6 +438,7 @@ profile——**正因为数据真的存在，这个错误特别像对的**。矩
 - **`ScoreBreakdown` 与加权和是两份手写列表**，这就是 `itinerary_fit` 会「被从和里删掉、模型却仍要求它」的原因（好一点是 `KeyError`，坏一点是一份声称用了某维度的分数）。现 breakdown 由 `ScoreBreakdown(**measured)` 构造，并有一条测试**从 breakdown 反算分数**要求与存储值一致
 - **同一个「伪造观测时间」的错误在 Overpass 上又出现一次**：`_osm_base_timestamp` 在没有 `osm3s.timestamp_osm_base` 时回退到 `datetime.now()`，引用却无条件写成 `PROVIDER_REPORTED`——一条没有时间戳的响应会声称「数据是几秒前的，且是 OSM 说的」，于是 `age_is_about_the_data` 为真、freshness 审计永远不报 `age_unknown`。现按 `amap/weather.py` 已有的正确形态处理：回退时 basis 改 `SOURCE_SILENT` 并记录 `osm_base_missing`。**它之所以活下来，是因为原有的测试只走了「有时间戳」这条路径，且从未断言过 basis**——两条新测试补上了这两件事
 - **数值解析修正**：`_parse_decimal()` 会跳过前导符号，`-1` 被解析为 `1`（畸形星级变合法、负数金额变正数价格），末尾的 `amount >= 0` 因此是死代码；现已保留符号并拒绝负值
+- **设置页最有行动价值的那句话从来没有被任何测试渲染过**：`provider-catalog.test.tsx` 的 fixture 把高德写成 `status: "planned"`（provider 早已实现，服务端还有一条测试专门钉住这点）且 aspects 含 `cycling`（部署中的 manifest 早已不声明），于是 `unlockHints` 的 `configurable` 桶永远是空的——`填入凭据后可提供路线规划：公交/地铁`，接入高德的全部理由，一句测试都没有；被测的反而是 `接入后才会提供` 那句关于未来工作的承诺。与成都常量同族：**描述一个世界已经离开的状态的测试不可能失败**。现拆成 `CATALOG`（保留 planned 渲染路径）与 `AMAP_AS_DEPLOYED`（生产真实形态），并由 `test_the_settings_page_fixture_matches_the_source_it_is_supposed_to_describe` 直接对着真实 `/providers/catalog` 响应比较 status / capabilities / routing aspects（而不是对着第二份手写副本）；status 改回 planned、去掉 `search_weather`、加回 `cycling`、去掉 `transit` 四种偏离变异全部被抓
 
 随 Phase 4C 又发现并修掉三处：
 

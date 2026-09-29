@@ -18,7 +18,79 @@ import type { Catalog } from "../../lib/providers";
  * Fetch is stubbed rather than mocked at the module level so the component's real
  * request path (including the bearer header handling in `apiRequest`) is
  * exercised.
+ *
+ * ## Two fixtures, because there are two states of the world
+ *
+ * `CATALOG` below describes 高德 as `planned` — a source that is listed and declared
+ * unimplemented. **The deployed server no longer sends that**, and has not since the AMap
+ * provider was implemented (`tests/unit/test_provider_catalog.py::
+ * test_the_amap_manifest_no_longer_claims_to_be_unimplemented` is the API-side guard).
+ * So `CATALOG` is kept for the *code path* — a future source really could be planned, and
+ * the rendering of that state is worth pinning — but it is not what production sends.
+ *
+ * `AMAP_AS_DEPLOYED` is what production sends. It exists because of the gap that made this
+ * distinction necessary: every test here used `CATALOG`, where the only inactive source
+ * with capabilities is 高德-as-planned, so `unlockHints` always returned an empty
+ * `configurable` list and the sentence
+ *
+ *     高德地图（AMap）：填入凭据后可提供路线规划：公交/地铁
+ *
+ * — the single most actionable thing this screen tells a traveller planning in China, and
+ * the entire reason 高德 is integrated — was **never rendered by any test**. A fixture that
+ * describes a state the server left behind cannot fail, in the same way that a test written
+ * against 成都 could not notice a 成都 constant.
+ *
+ * `tests/unit/test_web_api_contract.py` compares `AMAP_AS_DEPLOYED` against the live API so
+ * it cannot drift back.
  */
+
+/** 高德 exactly as `/api/v1/providers/catalog` reports it on an unconfigured deployment. */
+const AMAP_AS_DEPLOYED = {
+  id: "amap",
+  label: "高德地图（AMap）",
+  kind: "data" as const,
+  // Not `planned`: the provider is implemented and reaches a real service. Only the
+  // credential is absent.
+  status: "needs_credentials",
+  capabilities: [
+    "search_attractions",
+    "search_restaurants",
+    "search_hotels",
+    "calculate_routes",
+    "search_weather",
+    "resolve_places",
+  ],
+  // No `cycling`. AMap's transit endpoint is the reason this source exists, and it is also
+  // why the aspect list is narrower than the fixture above: the deployed manifest declares
+  // exactly what a request can ask for.
+  aspects: { calculate_routes: ["driving", "transit", "walking"] },
+  cost_note: "个人认证开发者有免费配额",
+  freshness_note: "按请求实时查询",
+  docs_url: "https://lbs.amap.com/",
+  caveats: [],
+  active: false,
+  credentials: [
+    {
+      key: "amap_web_service_key",
+      label: "高德 Web 服务 Key",
+      help: "在高德开放平台创建 Web 服务类型 Key",
+      docs_url: "https://lbs.amap.com/api/webservice/summary",
+      secret: true,
+      required: true,
+      configured: false,
+    },
+    {
+      key: "amap_js_api_key",
+      label: "高德 JS API Key",
+      help: "仅用于地图渲染，填了也不会改变规划结果",
+      docs_url: "https://lbs.amap.com/api/javascript-api/summary",
+      secret: true,
+      required: false,
+      configured: false,
+    },
+  ],
+  missing_credentials: ["amap_web_service_key"],
+};
 
 const CATALOG: Catalog = {
   providers: [
@@ -519,6 +591,69 @@ describe("ProviderCatalog", () => {
     await screen.findAllByText("OpenStreetMap / Overpass");
     const scope = within(cardFor("OpenStreetMap / Overpass"));
     expect(scope.queryByRole("button", { name: "测试连接" })).toBeNull();
+  });
+
+  describe("with 高德 as the deployed server actually reports it", () => {
+    function deployedCatalog(): Catalog {
+      return {
+        ...CATALOG,
+        providers: [CATALOG.providers[0], CATALOG.providers[1], AMAP_AS_DEPLOYED],
+        registered: ["openstreetmap", "osrm"],
+      };
+    }
+
+    it("tells the reader that supplying a 高德 key is what buys 公交/地铁", async () => {
+      // The sentence this whole screen exists to produce. Before this test, `unlockHints`
+      // returned an empty `configurable` list in every rendering test — 高德 was `planned`
+      // in the fixture and the AI model has no capabilities — so this text was never
+      // rendered while the test suite stayed green.
+      //
+      // Asserted as the reader sees it, in the actionable bucket ("填入凭据后可提供"), and
+      // not in the aspirational one ("接入后才会提供"). Getting the bucket wrong is the
+      // difference between advice a user can act on today and a promise about future work.
+      stubFetch(deployedCatalog());
+      render(<ProviderCatalog apiUrl="http://api.test" />);
+
+      expect(
+        await screen.findByText(/填入凭据后可提供路线规划：公交\/地铁/),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/接入后才会提供路线规划：公交\/地铁/)).toBeNull();
+    });
+
+    it("does not describe an implemented source as unimplemented", async () => {
+      // The `planned` wording is a factual claim about the code, and it was being made
+      // about a source that is finished. The two places it can leak are the status badge
+      // (`statusLabel`) and the contribution badge (`activityLabel`), so both are read on
+      // the deployed shape: "待配置" is the true state — the code is ready, the key is
+      // missing — and "缺凭据" names why it is not contributing.
+      stubFetch(deployedCatalog());
+      render(<ProviderCatalog apiUrl="http://api.test" />);
+
+      await screen.findAllByText("高德地图（AMap）");
+      const scope = within(cardFor("高德地图（AMap）"));
+
+      expect(scope.getByText("待配置")).toBeInTheDocument();
+      expect(scope.getAllByText("缺凭据").length).toBeGreaterThan(0);
+      // Never the pre-implementation wording, in either badge or in the caveat.
+      expect(scope.queryByText("尚未实现")).toBeNull();
+      expect(scope.queryByText(/状态为 planned/)).toBeNull();
+    });
+
+    it("does not offer cycling as something a 高德 key would unlock", async () => {
+      // 高德 closes 公交/地铁. It cannot close 骑行 — TravelMode has no cycling member at
+      // all — and the deployed manifest does not claim it. The stale fixture did claim it,
+      // which is how a "可补：骑行" promise could have been rendered from data the server
+      // never sends.
+      stubFetch(deployedCatalog());
+      render(<ProviderCatalog apiUrl="http://api.test" />);
+
+      await screen.findAllByText("高德地图（AMap）");
+
+      expect(screen.queryByText(/填入凭据后可提供路线规划：.*骑行/)).toBeNull();
+      expect(screen.queryByText(/可补：.*骑行/)).toBeNull();
+      // The tool-only gap is still disclosed, about the tool rather than about 高德.
+      expect(screen.getByText(/另有 1 项这个工具本身还不支持（骑行）/)).toBeInTheDocument();
+    });
   });
 
   it("shows a locked vault as unavailable with the server's reason", async () => {

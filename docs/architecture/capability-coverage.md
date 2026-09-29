@@ -99,6 +99,31 @@ assert payload["uncovered_capabilities"] == [], (
 
 `ASPECT_TRAVEL_MODES` 是让这件事可检查的关键：aspect 的词汇（`driving` / `walking` / `transit`）和 `TravelMode` 的成员（`drive` / `walk` / `transit`）是同一件事的两个名字，而在这张表存在之前，代码里没有任何地方说明谁对应谁——所以「有个 aspect 没有任何生产者」这件事在结构上无法被发现，这正是它没被发现的原因。注意名称相似度检查在这里会**失败**（`driving` 不是 `drive`），所以对应关系必须被声明而不是推断。`scripts/probe_reachable_aspects.py` 用这张表做全面检查，`tests/unit/test_provider_catalog.py` 把不变式钉进测试。
 
+### 这句话是怎么在测试全绿的情况下消失的
+
+服务端的矩阵、`closable_by`、`uncovered_aspects` 全都有测试，而**设置页上真正写给用户的那句话一句测试都没有**。
+
+原因是前端测试用的 fake 数据停在了一个已经不存在的世界：`apps/web/app/components/provider-catalog.test.tsx` 里的 `CATALOG` 把高德写成 `status: "planned"`（「尚未实现」），并声称它的 `calculate_routes` aspects 包含 `cycling`。而高德的 provider 早就实现完了，部署中的 manifest 也早已不声明骑行——服务端那边甚至有 `test_the_amap_manifest_no_longer_claims_to_be_unimplemented` 专门钉住这件事。
+
+后果比「少测一个分支」具体得多：
+
+- `unlockHints` 把高德归入 `planned` 桶，于是 `configurable` 桶**永远是空的**（唯一另一个未启用的条目是 AI 模型，而它没有任何能力）；
+- 所以 `填入凭据后可提供路线规划：公交/地铁` —— 这个设置页对国内旅行者最有行动价值的一句话，也是接入高德的全部理由 —— **从来没有被任何测试渲染过**；
+- `接入后才会提供` 那句（关于未来工作的承诺）反而被测了。
+
+这和成都常量是同一个缺陷家族：**描述一个世界已经离开的状态的测试，不可能失败**。一个用常量自身所在城市写的断言，看不出常量是错的；一份把自己写死的 fixture 拿去渲染的测试，看不出 fixture 已经过时。
+
+修法不是「补一条测试」，而是让 fixture 无法再偏离。现在有两份 fixture，各自说明自己描述的是哪个世界：
+
+| fixture | 描述什么 | 用途 |
+| --- | --- | --- |
+| `CATALOG` | 高德 `planned` | 保留 `planned` 渲染路径（将来的来源真的可能是 planned） |
+| `AMAP_AS_DEPLOYED` | 部署中真实的 `/providers/catalog` 响应 | 生产实际走的那条路径 |
+
+并且 `tests/unit/test_web_api_contract.py::test_the_settings_page_fixture_matches_the_source_it_is_supposed_to_describe` 把 `AMAP_AS_DEPLOYED` 直接对着**真实的 `/api/v1/providers/catalog` 响应**比较（status、capabilities、routing aspects），而不是对着第二份手写的副本。manifest 再变，这条测试就会失败并指出差在哪，而不是设置页悄悄过期。
+
+验证方式是变异：把 status 改回 `planned`、从 capabilities 里去掉 `search_weather`、给 aspects 加回 `cycling`、从 aspects 里去掉 `transit` —— 四种都会失败，且报错信息直接说明差在哪个字段。
+
 ## 这句话是不是真的
 
 上面那条 note 断言了行为：**预算里的住宿是估算额度，并且标了是估算**。这是关于行为的断言，所以它被验证而不是被相信：

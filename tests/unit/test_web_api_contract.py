@@ -602,3 +602,108 @@ def test_the_resolver_agrees_with_what_the_api_stored(client):
     # And with no mode, the pace still decides.
     response = _create(client, pace="relaxed")
     assert resolve_travel_mode(stored_profile(response)) is TravelMode.WALK
+
+
+CATALOG_TEST = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "web"
+    / "app"
+    / "components"
+    / "provider-catalog.test.tsx"
+)
+
+
+def _ts_string_array(source: str, field: str) -> list[str]:
+    """The string literals of one array field in the first object that has it."""
+    match = re.search(rf"{field}:\s*\[([^\]]*)\]", source, re.DOTALL)
+    assert match, f"could not find {field}: [...] in the fixture"
+    return re.findall(r'"([^"]*)"', match.group(1))
+
+
+def test_the_settings_page_fixture_matches_the_source_it_is_supposed_to_describe(tmp_path):
+    """The web's 高德 fixture must be the shape the server actually sends.
+
+    This is the fixture-drift defect, and it is the same family as the 成都 constant: a test
+    that describes a state the world has left behind cannot fail, so the behaviour it was
+    meant to protect goes unchecked while the suite stays green.
+
+    Concretely, every rendering test in ``provider-catalog.test.tsx`` described 高德 as
+    ``planned`` — a source listed and declared unimplemented — long after the AMap provider
+    was implemented. Among other consequences, ``unlockHints`` therefore never populated its
+    ``configurable`` list (the only other inactive entry is the AI model, which has no
+    capabilities), so the sentence
+
+        高德地图（AMap）：填入凭据后可提供路线规划：公交/地铁
+
+    never appeared in any test. That sentence is the most actionable thing the settings page
+    says to a traveller planning in China, and the entire reason 高德 is integrated.
+
+    So the comparison is made against the real catalogue rather than against a second
+    hand-written copy: the deployed fixture is read out of the TSX and checked against
+    ``/api/v1/providers/catalog``. If the AMap manifest changes again, this fails and names
+    the difference, instead of the settings page quietly going stale.
+    """
+    from fastapi.testclient import TestClient
+    from travel_api.config import Settings
+    from travel_api.main import create_app
+
+    source = CATALOG_TEST.read_text(encoding="utf-8")
+    # The deployed fixture, not `CATALOG`. `AMAP_AS_DEPLOYED` is a standalone object literal,
+    # so it is isolated by slicing from its declaration to the end of the literal.
+    start = source.index("const AMAP_AS_DEPLOYED")
+    end = source.index("\n};", start)
+    deployed = source[start:end]
+
+    assert 'status: "needs_credentials"' in deployed, (
+        "the deployed 高德 fixture must carry the status the server reports; `planned` is "
+        "the pre-implementation state and claiming it makes the screen describe code that "
+        "does not exist"
+    )
+
+    # A fresh app with the real free stack, because the shape being checked is what the
+    # keyless deployment reports — the module-wide `client` fixture runs on mocks, which
+    # would describe 高德 differently and defeat the comparison. The database is under
+    # `tmp_path` so running the suite leaves nothing in the checkout.
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                database_url=f"sqlite:///{tmp_path / 'catalog-contract.db'}",
+                auto_create_schema=True,
+                auth_enabled=False,
+                free_providers_enabled=True,
+                mock_provider_enabled=False,
+                provider_fixture_dir=None,
+            )
+        )
+    ) as client:
+        response = client.get("/api/v1/providers/catalog")
+    assert response.status_code == 200, response.text
+    catalog = response.json()
+
+    real = next(item for item in catalog["providers"] if item["id"] == "amap")
+    assert real["status"] == "needs_credentials", (
+        "this test assumes an unconfigured deployment; if that is no longer how 高德 reports "
+        "itself, update the fixture and this expectation together"
+    )
+
+    assert _ts_string_array(deployed, "capabilities") == real["capabilities"], (
+        "the fixture and the server disagree about which capabilities 高德 provides"
+    )
+
+    # The aspect list is the one that matters most: it is what decides whether the settings
+    # page promises 公交/地铁 (which a key really does buy) and whether it wrongly offers
+    # 骑行 (which no key can buy, because TravelMode has no cycling member).
+    fixture_modes = re.findall(r"calculate_routes:\s*\[([^\]]*)\]", deployed)
+    assert fixture_modes, "the deployed fixture declares no routing aspects"
+    fixture_aspects = re.findall(r'"([a-z]+)"', fixture_modes[0])
+    real_aspects = real["aspects"]["calculate_routes"]
+    assert fixture_aspects == real_aspects, (
+        f"the fixture claims aspects {fixture_aspects} but the server declares {real_aspects}"
+    )
+    assert "transit" in real_aspects, "高德 must declare 公交/地铁; it is the reason it exists"
+    assert "cycling" not in real_aspects, (
+        "高德 must not declare cycling: TravelMode cannot request it, so a key would not "
+        "unlock it and the settings page would promise something unreachable"
+    )
