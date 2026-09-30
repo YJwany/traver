@@ -1,6 +1,23 @@
 # Decision Engine
 
-预算层支持 `strict`、`balanced`、`comfort`、`time_first`、`food_first` 五种策略。策略改变候选权重和替换顺序，不改变 Provider 事实价格；超预算时 BudgetEngine 生成按体验影响排序的组合调整候选。
+预算层支持 `strict`、`balanced`、`comfort`、`time_first`、`food_first` 五种策略。
+
+**策略改变的是「估算额度」，不是价格，也不改变替换顺序。** 这一句此前写的是「策略改变候选权重和替换顺序」，而它是假的，两个分句都假：
+
+- 四个权重（`hotel_weight` / `food_weight` / `transport_weight` / `comfort_penalty`）被算出来之后**没有任何地方读过**。`calculate` 建好 `BudgetStrategy` 只用了 `name` 一个字段，把它存进 breakdown 当标签。实测同一份输入，五种策略给出**完全相同**的总价与逐项金额（`3760` 与 `['1600','1600','360','200','0']`），而策略是用户可选的（`planning_jobs.py`、`routes.py`）。五个名字是同一个行为的五个名字；
+- 「替换顺序」由 `decision_engine` 的 `DecisionWeights` 决定，不在这里，`reallocate` 也没有生产调用方。
+
+现在策略作用于**没有来源报价时的兜底额度**，并且只能作用于它：
+
+| 允许 | 不允许 |
+| --- | --- |
+| 缩放 `PriceFallback` 的每类额度（酒店/餐饮/交通） | 缩放任何来源报出的价格——那会把一个观测值乘上一个偏好，再挂上供应商的名字 |
+| 让 `strict` 对住处的**估算**高于 `comfort` | 改变排序（排序不在这一层） |
+| 在每一类都有报价时**完全无效** | 把带权重的估算提升为 `OBSERVED`——带权重的猜测仍然是猜测 |
+
+最后一行是这条规则最实用的表述：**估算没了，就没东西可加权**，所以一份全部有报价的预算不因策略而变。`comfort_penalty` 刻意不做第四个乘数：它的含义是「这个策略有多不愿意砍东西」，那是替换顺序的事，把它乘到各类额度上会让 `comfort` 在每一类上都最贵，正好和名字相反。
+
+超预算时 BudgetEngine 生成按体验影响排序的组合调整候选。
 
 ## 两阶段决策
 
