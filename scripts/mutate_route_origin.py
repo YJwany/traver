@@ -8,12 +8,8 @@ describing something other than the defect and are worth nothing.
 
 from __future__ import annotations
 
-import os
-import pathlib
-import subprocess
-import sys
+from _mutation_harness import ROOT, Case, run_harness
 
-ROOT = pathlib.Path(r"C:\Users\27875\Desktop\Traver")
 SERVICE = ROOT / "apps/api/src/travel_api/services/trip_service.py"
 TESTS = "tests/integration/test_route_origin.py"
 
@@ -73,55 +69,11 @@ MUTATIONS = [
     ),
 ]
 
-
-def run() -> tuple[int, str]:
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *TESTS.split(), "-q", "--no-header", "-p", "no:logging"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": str(ROOT / "apps/api/src"), "PYTHONUTF8": "1"},
-    )
-    return proc.returncode, proc.stdout[-1200:]
-
-
-def main() -> int:
-    original = SERVICE.read_text(encoding="utf-8")
-
-    def restore() -> None:
-        SERVICE.write_text(original, encoding="utf-8")
-
-    restore()
-    code, out = run()
-    if code != 0:
-        print(f"BASELINE FAILS — the tests do not pass on the fixed tree:\n{out}")
-        return 1
-    print("baseline (fixed tree): all tests pass\n")
-
-    uncaught: list[str] = []
-    for name, old, new in MUTATIONS:
-        restore()
-        text = SERVICE.read_text(encoding="utf-8")
-        if text.count(old) != 1:
-            print(f"NOT APPLIED ({text.count(old)} matches): {name}")
-            uncaught.append(name)
-            continue
-        SERVICE.write_text(text.replace(old, new), encoding="utf-8")
-        code, out = run()
-        print(f"{'caught' if code != 0 else 'NOT CAUGHT':11} {name}")
-        if code == 0:
-            uncaught.append(name)
-
-    restore()
-    print()
-    if uncaught:
-        print(f"{len(uncaught)} mutation(s) not accounted for:")
-        for name in uncaught:
-            print(f"  - {name}")
-        return 1
-    print(f"all {len(MUTATIONS)} mutations caught")
-    return 0
-
+#: Built from `MUTATIONS` rather than rewritten as `Case(...)` literals, so the anchored `old`
+#: strings above stay exactly as they were written. Every one of them is load-bearing: two of the
+#: four call sites are textually near-identical and the anchoring is what keeps a replacement from
+#: landing in the wrong method.
+CASES = [Case(name, SERVICE, old, new) for name, old, new in MUTATIONS]
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_harness(files=(SERVICE,), cases=CASES, test_targets=TESTS))

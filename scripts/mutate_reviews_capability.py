@@ -1,28 +1,38 @@
 """Mutation harness for the reviews capability and the shared element-age statistic.
 
-Two rules this harness follows, both learned the hard way on the OSM work:
+The three rules this follows live in `_mutation_harness.py` now, because all five harnesses in this
+directory had reimplemented them and three of them had got one wrong — this one, with the most
+thorough version, was the model for the shared runner:
 
-  1. It asserts the targeted tests PASS on the unmutated tree *first*. A mutation that does not
-     fire and a guard that does not work look identical from the outside; without this check the
-     harness cannot tell them apart.
-  2. It restores every file at the start of *every* iteration, not just at the end. Otherwise
-     case N's baseline runs case N-1's mutation and caught mutations get reported as uncaught.
+  1. The targeted tests must PASS on the unmutated tree *first*. A mutation that does not fire and
+     a guard that does not work look identical from the outside; without this check the harness
+     cannot tell them apart. Every distinct per-case target is baseline-checked, not just the
+     harness-wide one.
+  2. Every file is restored at the start of *every* iteration, not only at the end. Otherwise case
+     N runs against case N-1's mutation and caught mutations get reported as uncaught.
+  3. The restore reads a sidecar backup rather than whatever is currently on disk, and happens in a
+     `finally`. This one was added last, after a crash mid-run left a mutation on disk and the next
+     run adopted it as "the original" — the fix and the defect being the same file is not a
+     situation a harness should be able to create.
+
+Each case names the suite expected to notice it. That is a claim, not decoration: running an
+unrelated suite lets a different test fail for a different reason, which looks exactly like the
+mutation being caught.
 """
 
 from __future__ import annotations
 
-import pathlib
-import subprocess
-import sys
+from pathlib import Path
 
-ROOT = pathlib.Path(r"C:\Users\27875\Desktop\Traver")
+from _mutation_harness import ROOT, Case, run_harness
+
 AGG = ROOT / "apps/api/src/travel_api/services/aggregation.py"
 MODELS = ROOT / "apps/api/src/travel_api/domain/models.py"
 FRESH = ROOT / "apps/api/src/travel_api/services/freshness.py"
 EXPORT = ROOT / "apps/api/src/travel_api/services/export.py"
 OVERPASS = ROOT / "apps/api/src/travel_api/providers/free/overpass.py"
 
-TOUCHED = [AGG, MODELS, FRESH, EXPORT, OVERPASS]
+TOUCHED = (AGG, MODELS, FRESH, EXPORT, OVERPASS)
 
 REVIEW_TESTS = "tests/unit/test_reviews_capability.py"
 EXPORT_TESTS = "tests/unit/test_export_documents.py"
@@ -30,7 +40,7 @@ FRESH_TESTS = "tests/unit/test_freshness.py"
 FREE_TESTS = "tests/unit/test_free_providers.py"
 
 # (name, file, old, new, tests that must fail)
-CASES: list[tuple[str, pathlib.Path, str, str, str]] = [
+RAW_CASES: list[tuple[str, Path, str, str, str]] = [
     (
         "M1 do not derive the review set's age from the reviews",
         AGG,
@@ -120,69 +130,16 @@ CASES: list[tuple[str, pathlib.Path, str, str, str]] = [
     ),
 ]
 
-
-def run(tests: str) -> tuple[int, str]:
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *tests.split(), "-q", "--no-header", "-p", "no:logging"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env={
-            **__import__("os").environ,
-            "PYTHONPATH": str(ROOT / "apps/api/src"),
-            "PYTHONUTF8": "1",
-        },
-    )
-    return proc.returncode, proc.stdout[-1500:]
-
-
-def main() -> int:
-    originals = {path: path.read_text(encoding="utf-8") for path in TOUCHED}
-
-    def restore() -> None:
-        for path, text in originals.items():
-            path.write_text(text, encoding="utf-8")
-
-    restore()
-    print("== baseline (unmutated) ==")
-    failed: list[str] = []
-    for name, _path, _old, _new, tests in CASES:
-        code, out = run(tests)
-        if code != 0:
-            print(f"  !! BASELINE FAILS for {name}: {tests}")
-            print(out)
-            return 1
-    print("  all targeted suites pass unmutated\n")
-
-    for name, path, old, new, tests in CASES:
-        restore()
-        text = path.read_text(encoding="utf-8")
-        if old not in text:
-            print(f"NOT APPLIED (text not found): {name}\n  in {path.name}")
-            failed.append(name)
-            continue
-        if text.count(old) != 1:
-            print(f"AMBIGUOUS ({text.count(old)} matches): {name}")
-            failed.append(name)
-            continue
-        path.write_text(text.replace(old, new), encoding="utf-8")
-        code, out = run(tests)
-        status = "caught" if code != 0 else "NOT CAUGHT"
-        print(f"{status:11} {name}")
-        if code == 0:
-            failed.append(name)
-            print(out)
-
-    restore()
-    print()
-    if failed:
-        print(f"{len(failed)} of {len(CASES)} mutations NOT accounted for:")
-        for name in failed:
-            print(f"  - {name}")
-        return 1
-    print(f"all {len(CASES)} mutations caught")
-    return 0
-
+#: Built from the tuples above so the anchored `old` strings stay exactly as written. The per-case
+#: test target is preserved: it is what makes "which suite notices this" an explicit claim rather
+#: than "some test somewhere failed".
+CASES = [Case(name, path, old, new, tests) for name, path, old, new, tests in RAW_CASES]
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        run_harness(
+            files=TOUCHED,
+            cases=CASES,
+            test_targets="tests/unit/test_reviews_capability.py",
+        )
+    )

@@ -19,15 +19,14 @@ Two lessons from the earlier harnesses are applied here, because both cost time:
 
 from __future__ import annotations
 
-import os
-import pathlib
-import subprocess
-import sys
+from _mutation_harness import ROOT, Case, run_harness
 
-ROOT = pathlib.Path(r"C:\Users\27875\Desktop\Traver")
-OPTIMIZER = ROOT / "apps/api/src/travel_api/services/route_optimizer.py"
-BASE = ROOT / "apps/api/src/travel_api/providers/base.py"
-AGGREGATION = ROOT / "apps/api/src/travel_api/services/aggregation.py"
+FILES = (
+    ROOT / "apps/api/src/travel_api/services/route_optimizer.py",
+    ROOT / "apps/api/src/travel_api/providers/base.py",
+    ROOT / "apps/api/src/travel_api/services/aggregation.py",
+)
+OPTIMIZER, BASE, AGGREGATION = FILES
 TESTS = "tests/unit/test_travel_mode_speed.py"
 
 OLD_DERIVE = """def _derive_minutes(straight_line_meters: float, profile: TripProfile) -> int:
@@ -85,56 +84,7 @@ MUTATIONS = [
 ]
 
 
-def run() -> tuple[int, str]:
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", *TESTS.split(), "-q", "--no-header", "-p", "no:logging"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": str(ROOT / "apps/api/src"), "PYTHONUTF8": "1"},
-    )
-    return proc.returncode, proc.stdout[-900:]
-
-
-def main() -> int:
-    paths = (OPTIMIZER, BASE, AGGREGATION)
-    originals = {p: p.read_text(encoding="utf-8") for p in paths}
-
-    def restore() -> None:
-        for path, text in originals.items():
-            path.write_text(text, encoding="utf-8")
-
-    restore()
-    code, out = run()
-    if code != 0:
-        print(f"BASELINE FAILS — the tests do not pass on the fixed tree:\n{out}")
-        return 1
-    print("baseline (fixed tree): all tests pass\n")
-
-    uncaught: list[str] = []
-    for name, target, old, new in MUTATIONS:
-        restore()
-        text = target.read_text(encoding="utf-8")
-        if text.count(old) != 1:
-            print(f"NOT APPLIED ({text.count(old)} matches): {name}")
-            uncaught.append(name)
-            continue
-        target.write_text(text.replace(old, new), encoding="utf-8")
-        code, _ = run()
-        print(f"{'caught' if code != 0 else 'NOT CAUGHT':11} {name}")
-        if code == 0:
-            uncaught.append(name)
-
-    restore()
-    print()
-    if uncaught:
-        print(f"{len(uncaught)} mutation(s) not accounted for:")
-        for name in uncaught:
-            print(f"  - {name}")
-        return 1
-    print(f"all {len(MUTATIONS)} mutations caught")
-    return 0
-
+CASES = [Case(name, target, old, new) for name, target, old, new in MUTATIONS]
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_harness(files=FILES, cases=CASES, test_targets=TESTS))
