@@ -494,23 +494,11 @@ class TripService:
     def _recalculate_restaurants(self, trip: Trip, restaurants) -> Trip:
         preview = trip.preview
         selected_offer = self._selected_offer(preview, trip.selected_hotel_offer_id)
-        hotel = next(
-            (
-                item
-                for item in preview.hotels
-                if item.id == self._selected_hotel_id(preview, trip.selected_hotel_offer_id)
-            ),
-            None,
-        )
+        hotel_id, hotel_origin = self._selected_hotel_origin(preview, trip.selected_hotel_offer_id)
         itinerary = RouteOptimizer().optimize(
             trip.profile,
-            hotel.id if hotel else None,
-            (
-                hotel.location.coordinates.latitude,
-                hotel.location.coordinates.longitude,
-            )
-            if hotel
-            else (0.0, 0.0),
+            hotel_id,
+            hotel_origin,
             preview.attractions,
             restaurants,
             preview.route_legs,
@@ -556,11 +544,11 @@ class TripService:
     def _recalculate_attractions(self, trip: Trip, attractions) -> Trip:
         preview = trip.preview
         selected_offer = self._selected_offer(preview, trip.selected_hotel_offer_id)
-        hotel_id = self._selected_hotel_id(preview, trip.selected_hotel_offer_id)
+        hotel_id, hotel_origin = self._selected_hotel_origin(preview, trip.selected_hotel_offer_id)
         itinerary = RouteOptimizer().optimize(
             trip.profile,
             hotel_id,
-            (0.0, 0.0),
+            hotel_origin,
             attractions,
             preview.restaurants,
             preview.route_legs,
@@ -712,10 +700,11 @@ class TripService:
         attractions = [item for item in preview.attractions if str(item.id) != target]
         if len(attractions) == len(preview.attractions):
             raise TripRevisionError("attraction not found")
+        hotel_id, hotel_origin = self._selected_hotel_origin(preview, trip.selected_hotel_offer_id)
         itinerary = RouteOptimizer().optimize(
             trip.profile,
-            self._selected_hotel_id(preview, trip.selected_hotel_offer_id),
-            (0.0, 0.0),
+            hotel_id,
+            hotel_origin,
             attractions,
             preview.restaurants,
             preview.route_legs,
@@ -746,20 +735,11 @@ class TripService:
         pace = Pace(constraints.get("pace", Pace.RELAXED))
         profile = trip.profile.model_copy(update={"pace": pace})
         preview = trip.preview
-        hotel = next(
-            (
-                item
-                for item in preview.hotels
-                if item.id == self._selected_hotel_id(preview, trip.selected_hotel_offer_id)
-            ),
-            None,
-        )
+        hotel_id, hotel_origin = self._selected_hotel_origin(preview, trip.selected_hotel_offer_id)
         itinerary = RouteOptimizer().optimize(
             profile,
-            hotel.id if hotel else None,
-            (hotel.location.coordinates.latitude, hotel.location.coordinates.longitude)
-            if hotel
-            else (0.0, 0.0),
+            hotel_id,
+            hotel_origin,
             preview.attractions,
             preview.restaurants,
             preview.route_legs,
@@ -865,6 +845,42 @@ class TripService:
     def _selected_hotel_id(preview, offer_id: UUID | None):
         offer = TripService._selected_offer(preview, offer_id)
         return offer.hotel_id if offer else None
+
+    @staticmethod
+    def _selected_hotel_origin(
+        preview, offer_id: UUID | None
+    ) -> tuple[UUID | None, tuple[float, float] | None]:
+        """The selected hotel's id *and* coordinates, or ``(None, None)`` when there is no hotel.
+
+        The two are returned together because :meth:`RouteOptimizer.optimize` needs both or
+        neither. It looks a leg up by id, and where no measured leg exists it estimates the
+        minutes from the coordinates — so an id without coordinates is fine (no estimate is
+        made), but an id *with the wrong* coordinates is not: the estimate is made, from a place
+        the traveller has never been.
+
+        That is exactly what happened. Four call sites needed this pair; two built it from the
+        hotel object and two passed a literal ``(0.0, 0.0)`` beside a real id. The optimizer's
+        own guard could not catch it, because the guard reads the *id* —
+        ``hotel_coordinates if hotel_id is not None else None`` — and at those two sites the id
+        was genuinely set. So every leg without a measured route was timed from Null Island:
+        reproduced at 196688 minutes (136 days), which also pushed the item's start past the end
+        of the trip and then reported the drop as an opening-hours problem.
+
+        Returning the pair from one place removes the asymmetry rather than patching the two
+        sites that had it, which is the point — a fifth call site added later cannot get it wrong
+        by forgetting a branch.
+        """
+        hotel_id = TripService._selected_hotel_id(preview, offer_id)
+        if hotel_id is None:
+            return None, None
+        hotel = next((item for item in preview.hotels if item.id == hotel_id), None)
+        if hotel is None:
+            # An offer naming a hotel that is not in the plan. The id is still usable for looking
+            # a leg up; the coordinates are not knowable, and ``None`` says so. Substituting a
+            # placeholder here is the defect this function exists to prevent.
+            return hotel_id, None
+        coordinates = hotel.location.coordinates
+        return hotel_id, (coordinates.latitude, coordinates.longitude)
 
     @staticmethod
     def _budget_impact(before, after) -> dict[str, Any]:

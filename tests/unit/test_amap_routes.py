@@ -27,9 +27,9 @@ from travel_api.providers.amap.routing import (
     DIRECTION_PATH_BY_MODE,
     DISTANCE_TYPE_BY_MODE,
     AmapRoutingProvider,
-    mode_for_pace,
 )
 from travel_api.providers.base import resolve_travel_mode
+from travel_api.providers.free.osrm import mode_for_pace
 
 
 def _point(latitude: float, longitude: float) -> RoutePoint:
@@ -95,9 +95,15 @@ def _reference(provider, mode: TravelMode, point_count: int = 2):
         (Pace.FULL, TravelMode.DRIVE),
     ],
 )
-def test_mode_follows_pace_like_the_osrm_provider(pace, expected):
-    """Kept identical to OSRM so that plugging in AMap changes *quality*, not which
-    journeys the plan is built around."""
+def test_an_unset_mode_derives_from_pace(pace, expected):
+    """The pace-to-mode map survives only as the *default*, and it is one function.
+
+    It used to be three copies — one in each provider plus the shared resolver — and the
+    two provider-local ones were dead code whose docstrings claimed to be "the fallback
+    half of ``resolve_travel_mode``". They were not: nothing called them. An unused copy
+    of a rule is worse than no copy, because it reads as the authority on it.
+    """
+    assert resolve_travel_mode(_profile(pace)) == expected
     assert mode_for_pace(pace) == expected
 
 
@@ -185,11 +191,23 @@ def test_the_two_providers_agree_on_the_mode_for_one_profile():
 
     If they disagreed, one source's measured legs would be computed against a different
     assumption than the other's and nothing in the payload would reconcile them.
-    """
-    from travel_api.providers.free.osrm import mode_for_pace as osrm_mode_for_pace
 
-    for pace in Pace:
-        assert mode_for_pace(pace) is osrm_mode_for_pace(pace)
+    This used to compare the two providers' *own* ``mode_for_pace`` copies against each
+    other, which proves only that two duplicates of a rule were written the same way. Both
+    copies are gone; there is one resolver, and what is checked here is that both providers
+    actually route through it rather than re-deriving the mode internally.
+    """
+    import inspect
+
+    from travel_api.providers.amap import routing as amap_routing
+    from travel_api.providers.free import osrm as osrm_module
+
+    for module, label in ((amap_routing, "amap"), (osrm_module, "osrm")):
+        source = inspect.getsource(module)
+        assert "mode_for_pace(" not in source.replace("def mode_for_pace(", ""), (
+            f"{label} derives the mode itself instead of calling resolve_travel_mode; a "
+            "second derivation is what let one provider answer for a mode the other refused"
+        )
 
     for mode in (TravelMode.WALK, TravelMode.DRIVE, TravelMode.TAXI, TravelMode.TRANSIT):
         profile = TripProfile(

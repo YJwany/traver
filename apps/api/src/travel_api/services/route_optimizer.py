@@ -13,14 +13,20 @@ from travel_api.domain.models import (
     Pace,
     Restaurant,
     RouteLeg,
+    TravelMode,
     TripProfile,
 )
+from travel_api.providers.base import resolve_travel_mode
 
 #: Assumed urban speeds used only when the routing provider has no leg for a pair.
 #: Straight-line distance under-estimates road distance, so these are deliberately
 #: conservative and every leg derived from them is recorded as an estimate.
 _WALKING_METERS_PER_MINUTE = 75.0  # ~4.5 km/h
 _DRIVING_METERS_PER_MINUTE = 400.0  # ~24 km/h
+#: 公交 / 地铁: slower than a car because of stops, boarding and waiting; faster than walking.
+#: Kept above the walking figure deliberately — a transit estimate that came out *worse* than
+#: walking would make the planner prefer to send someone 10 km on foot.
+_TRANSIT_METERS_PER_MINUTE = 250.0  # ~15 km/h
 #: Road distance exceeds straight-line distance by roughly this factor in a city.
 _ROAD_DETOUR_FACTOR = 1.3
 
@@ -180,7 +186,15 @@ class RouteOptimizer:
             # Chinese because the server's own prose is Chinese everywhere else — this line
             # reaches the user directly, and it was showing up untranslated in the middle of an
             # otherwise Chinese exported itinerary.
-            conflicts.append(f"{estimated_legs} 段路程按距离估算，不是实测路线")
+            #
+            # The assumed speed is named, not just the fact of estimation. "按距离估算" says the
+            # number is not measured, which is honest but not yet checkable: a reader cannot tell
+            # a plausible estimate from an absurd one without knowing the speed behind it, and
+            # this figure is exactly where an absurd one lived (18 km/h on foot, when the speed
+            # followed the pace instead of the mode). Naming it makes a wrong assumption legible
+            # in the output instead of only in the code.
+            _, speed_text = assumed_speed_for(profile)
+            conflicts.append(f"{estimated_legs} 段路程按距离估算（{speed_text}），不是实测路线")
         return Itinerary(days=days, conflicts=conflicts)
 
     def _next_open_attraction(
@@ -303,18 +317,78 @@ def _haversine_meters(origin: tuple[float, float], destination: tuple[float, flo
     return straight_line_meters(origin, destination)
 
 
+#: Metres per minute assumed for each mode when no measured leg exists.
+_ASSUMED_SPEED_BY_MODE = {
+    TravelMode.WALK: _WALKING_METERS_PER_MINUTE,
+    TravelMode.TRANSIT: _TRANSIT_METERS_PER_MINUTE,
+    TravelMode.TAXI: _DRIVING_METERS_PER_MINUTE,
+    TravelMode.DRIVE: _DRIVING_METERS_PER_MINUTE,
+}
+
+#: How the assumption reads to a person, for the disclosure below.
+#:
+#: Written with Chinese units (每小时 N 公里) rather than ``km/h``. Both are understood by a
+#: Chinese reader, but this prose is checked by ``test_user_facing_prose.py``, which flags runs
+#: of Latin letters in text the user reads — and it flagged this on the first attempt. The check
+#: was right and the wording was wrong: the rest of the sentence is Chinese, and a unit is not a
+#: proper noun that has to keep its original spelling the way 高德 or OSRM do.
+_ASSUMED_SPEED_TEXT = {
+    TravelMode.WALK: "步行按每小时 4.5 公里估算",
+    TravelMode.TRANSIT: "公交/地铁按每小时 15 公里估算，含候车与停站",
+    TravelMode.TAXI: "打车按每小时 24 公里估算",
+    TravelMode.DRIVE: "驾车按每小时 24 公里估算",
+}
+
+
+def assumed_speed_for(profile: TripProfile) -> tuple[int, str]:
+    """The speed an unmeasured leg is estimated at, and how to say so.
+
+    Returned as a pair because the number and its disclosure must not be able to disagree: the
+    itinerary tells the traveller these minutes are 按距离估算, and a reader who wants to judge
+    the number needs the speed behind it.
+
+    This used to read only ``profile.pace``: RELAXED and BALANCED meant walking, FULL meant
+    driving, and ``travel_mode`` was never consulted. That is a third derivation of the mode —
+    ``resolve_travel_mode`` in ``providers/base.py`` already warns that the mode must be derived
+    in one place, because the routing providers have to agree about it — and it produced two
+    wrong answers in opposite directions, both reproducible on a ~13 km hop in 成都:
+
+    ==================  ==============  ==========  =========
+    request             old minutes     old speed   meaning
+    ==================  ==============  ==========  =========
+    FULL + walk         44              18.2 km/h   jogging
+    RELAXED + drive     231             3.5 km/h    crawling
+    ==================  ==============  ==========  =========
+
+    FULL is an *itinerary density* — how many stops fit in a day — and it was silently choosing
+    a car. A traveller who asked to walk and a traveller who asked to drive got the same number,
+    and neither was told which assumption produced it.
+
+    The mode is now resolved by the shared function, so a pace-derived mode keeps its old
+    behaviour exactly (``resolve_travel_mode`` still maps RELAXED/BALANCED to walk and FULL to
+    drive when ``travel_mode`` is unset) and an explicit mode is honoured.
+    """
+    mode = resolve_travel_mode(profile)
+    speed = _ASSUMED_SPEED_BY_MODE.get(mode, _DRIVING_METERS_PER_MINUTE)
+    return int(speed), _ASSUMED_SPEED_TEXT.get(mode, "按驾车速度估算")
+
+
 def _derive_minutes(straight_line_meters: float, profile: TripProfile) -> int:
     road_meters = straight_line_meters * _ROAD_DETOUR_FACTOR
-    speed = (
-        _WALKING_METERS_PER_MINUTE
-        if profile.pace in (Pace.RELAXED, Pace.BALANCED)
-        else _DRIVING_METERS_PER_MINUTE
-    )
+    speed, _ = assumed_speed_for(profile)
     return max(1, ceil(road_meters / speed))
 
 
 def _pace_allowance(profile: TripProfile) -> int:
-    """Last-resort allowance when nothing at all is known about a hop."""
+    """Last-resort allowance when nothing at all is known about a hop.
+
+    Neither endpoint has coordinates, so there is nothing to measure and no distance to divide —
+    this is the only figure here that cannot depend on the mode at all. It therefore stays a
+    pace allowance, which is what it is named for and what it is: how long a gap this planner is
+    willing to assume, scaled by how tightly the traveller wants the day packed. The mode is
+    deliberately *not* consulted, because a mode with no distance has no speed to apply; claiming
+    otherwise would be inventing a measurement out of a preference.
+    """
     return max(5, ceil(15 * (1.4 if profile.pace is Pace.RELAXED else 1.0)))
 
 

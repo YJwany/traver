@@ -219,9 +219,14 @@ def routing_server_for(
 def mode_for_pace(pace: Pace) -> TravelMode:
     """Pick a travel mode from the pace alone.
 
-    Retained as the fallback half of :func:`resolve_travel_mode`; callers holding a whole
-    profile should use that instead, so an explicit 公交/地铁 request is not silently
-    treated as a request for something this provider does serve.
+    Kept because the pace-to-mode map is a published behaviour worth naming, but
+    :func:`resolve_travel_mode` is the only thing that should decide a trip's mode: it
+    consults an explicit 公交/地铁 request first. This function cannot express transit at
+    all, so a caller that reaches for it directly makes the headline capability
+    unreachable again while every test of the transit code still passes.
+
+    Naming that trap is the whole reason this is public rather than inlined — see
+    ``test_amap_routes.py::test_the_pace_alone_can_never_select_transit``.
     """
     return TravelMode.WALK if pace in (Pace.RELAXED, Pace.BALANCED) else TravelMode.DRIVE
 

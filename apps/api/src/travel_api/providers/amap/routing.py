@@ -54,7 +54,6 @@ from travel_api.domain.models import (
     DataDomain,
     Money,
     ObservationBasis,
-    Pace,
     PriceType,
     ProviderHealth,
     ProviderResult,
@@ -117,20 +116,6 @@ ESTIMATED_COST_PER_KM_CNY = 2.5
 #: the same way the OSRM provider clamps to its own coordinate limit, so the sweep's
 #: origins can never exceed it regardless of how the point budget is configured.
 AMAP_MAX_MATRIX_ORIGINS = 100
-
-
-def mode_for_pace(pace: Pace) -> TravelMode:
-    """Pick a travel mode from the trip's pace alone.
-
-    Mirrors the OSRM provider's choice so that swapping in AMap does not silently
-    change which journeys a plan is built around — the only intended difference is
-    that AMap can actually answer for the mode it picks.
-
-    Retained as the fallback half of :func:`resolve_travel_mode`; callers that hold a
-    whole profile should use that instead, or an explicit 公交/地铁 request would be
-    ignored.
-    """
-    return TravelMode.WALK if pace in (Pace.RELAXED, Pace.BALANCED) else TravelMode.DRIVE
 
 
 def _format_location(point: RoutePoint) -> str:
@@ -768,5 +753,4 @@ __all__ = [
     "DISTANCE_TYPE_BY_MODE",
     "AmapRoutingProvider",
     "WALKING_SPEED_METERS_PER_SECOND",
-    "mode_for_pace",
 ]
