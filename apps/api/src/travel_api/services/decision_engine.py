@@ -196,9 +196,23 @@ def score_hotel_offers(
 
         measured: dict[str, float] = {
             "price": max(0.0, 1.0 - float(offer.total_price) / max_price),
-            "rating": (hotel.rating or 0) / 5,
             "user_preference": _preference_score(profile),
         }
+        # The rating is *omitted* when no source published one, exactly like `transit` and
+        # `location` below — not set to zero. `ScoreBreakdown.rating` documents `None` as "not
+        # measured" and says in as many words that `0.0` is deliberately not used because it reads
+        # as "worst possible", which is a measurement. This line wrote `(hotel.rating or 0) / 5`,
+        # so a hotel whose rating nobody published was scored as if it had the worst one.
+        #
+        # It is not merely a wrong entry in the breakdown. The total is normalised over the
+        # dimensions present, so the zero also sat in the denominator and shrank every score — a
+        # silent penalty on the *common* case. Today every hotel in every deployment has
+        # `rating=None`: OSM's `stars` is a self-declared classification rather than a guest score
+        # and 高德 lists `rating` among its own `absent_fields`. That is also why no test caught
+        # it — `providers/mock.py` returns 4.8 and 4.6, and every test in `test_hotel_scoring.py`
+        # uses that fixture, which carries a field no shipped source produces.
+        if hotel.rating is not None:
+            measured["rating"] = hotel.rating / 5
         # `itinerary_fit` asks "is this hotel in the city the trip is about", and comparing the
         # two names by equality does not answer it. The traveller types 丽江; Nominatim reports
         # `address.city == "丽江市"`, while 高德 is queried with the traveller's own text and
@@ -251,6 +265,7 @@ def score_hotel_offers(
                     same_district=same_district,
                     same_city=same_city,
                     main_district=geography.main_district if geography else None,
+                    destination=profile.destination,
                 ),
             )
         )
@@ -297,12 +312,17 @@ def _explanations(
     same_district: bool | None,
     same_city: bool | None,
     main_district: str | None,
+    destination: str,
 ) -> list[str]:
     """The sentences a reader sees for one offer.
 
     Everything here states a measurement that was made, and where none was possible it says
     so instead of printing a number. The old wording printed a distance derived from a
     hardcoded point, which is the one thing this must never do again.
+
+    ``destination`` is passed in rather than read off the hotel for the one sentence that has to
+    name it: the two are different values, and using the hotel's own city in the destination's
+    slot is how that sentence came to name the wrong place.
     """
     lines = [
         f"总价 ¥{offer.total_price}，{offer.nights} 晚",
@@ -321,7 +341,17 @@ def _explanations(
         lines.append(f"所在城区与行程主要城区（{main_district}）{relation}")
 
     if same_city is None:
-        lines.append(f"酒店没有上报所在城市，无法与目的地（{hotel.location.city or '未知'}）比较")
+        # `same_place_name` returns None when *either* side is absent, and only the hotel's side
+        # can be: `TripProfile.destination` is required and non-empty. So this branch means the
+        # hotel did not say, and the destination is the thing we know.
+        #
+        # This used to print the destination slot as `hotel.location.city or '未知'` — the hotel's
+        # own city, or 未知, sitting inside 「目的地（…）」. So a hotel with no city produced
+        # 「无法与目的地（未知）比较」, telling the reader we could not compare against somewhere
+        # they never named, while the place they *had* named went unmentioned. With a city
+        # present it would have named the hotel's city as the destination, which is worse than
+        # 未知: a wrong place stated confidently.
+        lines.append(f"酒店没有上报所在城市，无法与目的地（{destination}）比较")
     elif not same_city:
         # Only said when it is a *finding*. Saying "different city" is a claim about the hotel,
         # and the reader deciding between offers should be told when one is somewhere else.

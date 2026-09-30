@@ -423,3 +423,174 @@ def test_the_constraint_list_names_only_dimensions_that_were_scored():
             "the constraint list claims a proximity check that could not be made"
         )
         assert not any("district" in item for item in decision.matched_constraints)
+
+
+# -- an unpublished rating is absent, not zero ---------------------------------
+#
+# This one hid behind the fixture for the same reason the 成都 coordinate did: `build_hotels`
+# returns hotels with `rating` 4.8 and 4.6, and **every test in this file uses that fixture** —
+# while no shipped source publishes a hotel rating at all. OSM's `stars` is a self-declared
+# classification rather than a guest score, and 高德 lists `rating` among its own `absent_fields`,
+# so `Hotel.rating` is `None` for every hotel in every real deployment. The fixture has a field
+# the real world does not, and an assertion written on the fixture cannot see the difference.
+
+
+def _unrated(*, first_district: str, second_district: str):
+    """The same two hotels with no rating, which is what a real source produces."""
+    hotels, offers = _hotels(first_district=first_district, second_district=second_district)
+    return [hotel.model_copy(update={"rating": None}) for hotel in hotels], offers
+
+
+def test_an_unpublished_rating_is_absent_rather_than_worst_possible():
+    """`ScoreBreakdown.rating` documents `None` as "not measured" and warns against `0.0`.
+
+    The scorer wrote `(hotel.rating or 0) / 5`, so a hotel whose rating nobody published was
+    recorded as having scored the worst possible one — and `0.0` is a *measurement*: a reader
+    cannot tell it from a hotel that genuinely rated zero.
+    """
+    hotels, offers = _unrated(first_district=XIHU, second_district=SHANGCHENG)
+    decisions = score_hotel_offers(
+        hotels,
+        offers,
+        _profile(),
+        geography=plan_geography([hotel.location for hotel in hotels]),
+    )
+    assert decisions
+    for decision in decisions:
+        assert decision.score_breakdown.rating is None, (
+            f"an unrated hotel scored {decision.score_breakdown.rating!r}. `None` means not "
+            "measured; `0.0` reads as 'worst possible', which is a different claim."
+        )
+
+
+def test_the_other_dimensions_are_not_diluted_by_an_absent_rating():
+    """The consequence of including it, and the reason this is not cosmetic.
+
+    The total is normalised over the dimensions actually present. A rating of `0.0` was therefore
+    not merely a wrong entry in the breakdown — it also sat in the denominator, so a hotel with
+    everything else measured well scored lower than the same hotel would with a rating, purely
+    because a source was silent. That is a silent penalty on the common case.
+    """
+    rated, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG)
+    unrated = [hotel.model_copy(update={"rating": None}) for hotel in rated]
+    weights = DecisionWeights()
+    geography = plan_geography([hotel.location for hotel in rated])
+
+    unrated_decisions = score_hotel_offers(
+        unrated, offers, _profile(), weights=weights, geography=geography
+    )
+    assert unrated_decisions
+    breakdown = unrated_decisions[0].score_breakdown
+    assert breakdown.rating is None
+
+    # Recomputed over exactly the dimensions the scorer had, which no longer includes rating.
+    # Derived from the breakdown's own fields rather than listed by hand: a hand-written list here
+    # would be a second copy of the weights to keep in step, and getting that wrong is how the
+    # original `itinerary_fit` bug happened. `None` means not measured, so it is left out.
+    present = {
+        name: (value, getattr(weights, name))
+        for name, value in breakdown.model_dump().items()
+        if value is not None
+    }
+    assert "rating" not in present, "the rating is present in the breakdown after all"
+    assert len(present) >= 3, f"expected several measured dimensions, got {sorted(present)}"
+    expected = sum(value * weight for value, weight in present.values()) / sum(
+        weight for _, weight in present.values()
+    )
+    assert unrated_decisions[0].score == pytest.approx(expected, abs=1e-6), (
+        "the score still divides by the rating's weight, so an absent rating is shrinking every "
+        "score instead of being left out"
+    )
+
+
+def test_a_published_rating_is_still_used_and_normalised():
+    """The guard against over-correcting into never scoring a rating at all.
+
+    Dropping the dimension whenever it is inconvenient would satisfy the tests above while
+    throwing away the one case where a source *did* publish one — which is what a real review
+    source is for.
+    """
+    hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG)
+    assert hotels[0].rating is not None, "the fixture must carry a rating for this to test it"
+    decisions = score_hotel_offers(
+        hotels,
+        offers,
+        _profile(),
+        geography=plan_geography([hotel.location for hotel in hotels]),
+    )
+    by_offer = {decision.candidate_id: decision for decision in decisions}
+    for hotel, offer in zip(hotels, offers, strict=True):
+        score = by_offer[offer.id].score_breakdown.rating
+        assert score is not None
+        assert score == pytest.approx(hotel.rating / 5)
+
+
+# -- the sentence must name the destination, not the hotel ---------------------
+
+
+def test_the_uncomparable_city_sentence_names_where_the_traveller_is_going():
+    """`same_place_name` returns None when either side is missing, and only one side can be.
+
+    `TripProfile.destination` is required and non-empty, so an incomparable city always means the
+    *hotel* stayed silent. The wording printed the hotel's own city (or 未知) inside the
+    destination's slot:
+
+        f"酒店没有上报所在城市，无法与目的地（{hotel.location.city or '未知'}）比较"
+
+    so a hotel with no city produced 「无法与目的地（未知）比较」 — telling the reader we could not
+    compare against somewhere they never named — while the place they *had* named went unmentioned.
+    """
+    hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG, city="杭州")
+    cityless = [
+        hotels[0].model_copy(
+            update={"location": hotels[0].location.model_copy(update={"city": ""})}
+        ),
+        hotels[1],
+    ]
+    decisions = score_hotel_offers(
+        cityless,
+        offers,
+        _profile(destination="丽江"),
+        geography=plan_geography([hotel.location for hotel in cityless]),
+    )
+    by_offer = {decision.candidate_id: decision for decision in decisions}
+    unknown = by_offer[offers[0].id]
+
+    sentence = next(line for line in unknown.explanations if "无法与目的地" in line)
+    assert "丽江" in sentence, (
+        f"the sentence does not name the trip's destination: {sentence!r}. The traveller typed "
+        "丽江; that is the value this sentence is about."
+    )
+    assert "未知" not in sentence, f"the destination slot was filled from the hotel: {sentence!r}"
+
+
+def test_a_hotel_with_a_city_never_has_its_own_city_printed_as_the_destination():
+    """The other half of the same defect, which the `or '未知'` fallback masked.
+
+    With `hotel.location.city` present, the old expression would have printed the *hotel's* city
+    as the destination — a wrong place named confidently, which is worse than 未知.
+    """
+    hotels, offers = _hotels(first_district=XIHU, second_district=SHANGCHENG, city="杭州")
+    # Relocate the hotel to a city unrelated to the destination, so the two are distinguishable
+    # by name rather than by the absence of a value.
+    relocated = [
+        hotels[0].model_copy(
+            update={"location": hotels[0].location.model_copy(update={"city": "成都"})}
+        ),
+        hotels[1],
+    ]
+    decisions = score_hotel_offers(
+        relocated,
+        offers,
+        _profile(destination="丽江"),
+        geography=plan_geography([hotel.location for hotel in relocated]),
+    )
+    by_offer = {decision.candidate_id: decision for decision in decisions}
+
+    # 成都 vs 丽江 is comparable and different, so this one reports a finding rather than silence.
+    different = [line for line in by_offer[offers[0].id].explanations if "与目的地不同" in line]
+    assert different, by_offer[offers[0].id].explanations
+    assert "成都" in different[0], "the hotel's own city must be named as the hotel's"
+
+    # And the comparable case must not produce the "cannot compare" sentence at all.
+    assert not any("无法与目的地" in line for line in by_offer[offers[0].id].explanations)

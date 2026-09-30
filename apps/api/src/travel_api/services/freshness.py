@@ -62,6 +62,24 @@ MAX_AGE_SECONDS: dict[str, int] = {
     # it a horizon here would produce a warning on every genuinely useful old guide,
     # which is how a reader learns to ignore warnings. Undated notes are still reported
     # as age-unknown through the normal ``SOURCE_SILENT`` path.
+    #
+    # Deliberately absent: ``place_lookup`` — and this one needs saying out loud, because
+    # the *reference* certainly exists. `aggregation.py` emits ``("place_lookup", ref)``
+    # pairs for every name the notes mentioned that our sources did not already have, so a
+    # missing key here silently means those citations are skipped by `audit` entirely.
+    #
+    # That silence is correct, but for a reason worth writing down rather than leaving to be
+    # inferred from an omission. Geocoder responses are ``SOURCE_SILENT``: the index's rebuild
+    # time is not published, so an ``observed_at`` for one of them is really our fetch time
+    # wearing the wrong label (see `docs/architecture/content-ingestion.md`). With a horizon,
+    # every single coordinate lookup would therefore produce an `age_unknown` finding — not
+    # because anything is uncertain about where 西湖 is, but because we would have asked a
+    # question the source never answers. A finding that can only ever read "unknown" carries no
+    # information and would bury the ones that do.
+    #
+    # The distinction: ``user_content`` is absent because old notes are genuinely fine, and
+    # *this* is absent because a place's location is not the kind of fact that goes stale at
+    # all. Both are absences; they are not the same absence.
 }
 
 
