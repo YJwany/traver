@@ -8,7 +8,7 @@ The live end-to-end checks live in tests/integration/test_free_providers_live.py
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -36,7 +36,7 @@ from travel_api.providers.free.geo import (
     _score_open_meteo_result,
 )
 from travel_api.providers.free.http import FreeHttpClient
-from travel_api.providers.free.open_meteo import OpenMeteoWeatherProvider
+from travel_api.providers.free.open_meteo import MAX_FORECAST_DAYS, OpenMeteoWeatherProvider
 from travel_api.providers.free.osrm import OsmRoutingProvider
 from travel_api.providers.free.overpass import OverpassPoiProvider, _parse_star_classification
 
@@ -841,12 +841,48 @@ async def test_the_snapshot_time_is_not_the_age_of_the_elements():
     assert element_age.count == 3, "all three mapped elements carry a `meta` timestamp"
 
     # The snapshot and the elements are two different magnitudes, and that gap is the point.
-    # Asserted as a ratio rather than an absolute, because the fixture's snapshot is a fixed
-    # instant while "now" moves: the claim being tested is that the reported data age is about
-    # our copy, not about the facts in it.
-    assert reference.data_age_seconds < 3 * 86400, "the fixture snapshot is days old at most"
-    assert element_age.median_seconds > reference.data_age_seconds * 100, (
-        "the median element must be orders of magnitude older than the snapshot; if the two are "
+    #
+    # Asserted as a *difference*, not as a bound and not as a ratio. The fixture's snapshot is a
+    # fixed instant while "now" moves, and both figures here are measured back from "now" — so:
+    #
+    #   * `data_age_seconds < 3 * 86400` was only true for three days after the fixture's date,
+    #     which is a test that cannot stay green. It asserted when the suite runs, not what the
+    #     code does, and it went red at 3.09 days.
+    #   * A ratio (`median > snapshot * 100`) decays too, toward 1, because numerator and
+    #     denominator grow at the same rate. It read 571 at the time of writing and would have
+    #     started failing about nine days later — a second expiry hiding behind the first.
+    #   * The difference is what is actually fixed by the fixture: it is
+    #     `snapshot_instant - element_edit_instant`, two constants, and it never moves.
+    #
+    # The claim being tested is that the reported data age is about our copy and not about the
+    # facts in it, and a difference is the shape of that claim.
+    snapshot_to_median = element_age.median_seconds - reference.data_age_seconds
+    snapshot_to_oldest = element_age.oldest_seconds - reference.data_age_seconds
+
+    # Tie the arithmetic to the fixture's own instants rather than to a magic number, so the
+    # invariant is visible. Both sides are subtractions of two absolute times, and the seconds
+    # of slop cover the integer truncation in each age.
+    #
+    # Conditional because `data_age_seconds` clamps at zero: with the clock ahead of the fixture
+    # — the real case, and always — the two sides agree exactly, and that agreement is what shows
+    # both numbers sit on one timeline. With the clock *behind* the fixture the snapshot reads as
+    # "in the future", the age clamps to 0, and the sides differ by precisely that offset. That
+    # needs a backwards clock, so it is not a case worth failing over; skipping is honest about
+    # which direction this check covers, and the assertions below hold either way.
+    if reference.observed_at <= reference.fetched_at:
+        assert snapshot_to_oldest == pytest.approx(
+            (reference.observed_at - element_age.oldest_at).total_seconds(), abs=2
+        ), (
+            "the oldest element's age is not measured against the same clock as the snapshot, so "
+            "the two numbers cannot be subtracted"
+        )
+    else:
+        assert snapshot_to_oldest == pytest.approx(
+            (reference.fetched_at - element_age.oldest_at).total_seconds(), abs=2
+        ), "the snapshot is ahead of our fetch, and the clamped age does not match either clock"
+
+    assert snapshot_to_median > 4 * 365 * 86400, (
+        "the median element must be years older than the snapshot we received; if the two are "
         "close, the snapshot is being reported as the age of the data"
     )
     assert element_age.median_seconds > 365 * 86400, (
@@ -1054,8 +1090,16 @@ async def test_weather_maps_wmo_codes_and_flags_bad_outdoor_days():
 
 
 async def test_weather_warns_when_the_trip_is_beyond_the_forecast_horizon():
+    """Derived from today, because a hardcoded "far future" date stops being one.
+
+    This read `date(2027, 6, 1)`, which was beyond the 16-day horizon when it was written and
+    silently stops being so on **2027-05-16** — after which the provider correctly returns no
+    warning and this test fails for a reason that has nothing to do with the code. Found by
+    running the suite with the clock shifted (`scripts/clock_shift_plugin.py`).
+    """
     http, _, _, weather, _ = build_stack()
-    far_future = make_profile(start_date=date(2027, 6, 1), end_date=date(2027, 6, 5))
+    beyond = date.today() + timedelta(days=MAX_FORECAST_DAYS + 30)
+    far_future = make_profile(start_date=beyond, end_date=beyond + timedelta(days=4))
     result = await weather.search_weather(far_future)
     assert result.errors
     assert "超出天气预报范围" in result.errors[0]
