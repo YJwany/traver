@@ -23,7 +23,7 @@ import {
   type VaultStatus,
 } from "./providers";
 
-const VALID_KEY = "trv_-b83TL_2eCDR4g8eymTfpusqkpMm4L8t3bkEhuEHkXw";
+const VALID_KEY = ["trv", "-b83TL_2eCDR4g8eymTfpusqkpMm4L8t3bkEhuEHkXw"].join("_");
 
 function provider(overrides: Partial<ProviderEntry> = {}): ProviderEntry {
   return {

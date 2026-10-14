@@ -36,3 +36,5 @@ htmlcov/
 # Vitest / Vite caches.
 .vitest/
 vite.config.ts.timestamp-*
+# Local workspace notes are not application source.
+.workbuddy-ai/

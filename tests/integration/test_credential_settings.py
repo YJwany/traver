@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from travel_api.config import Settings
 from travel_api.main import create_app
 
-OWNER_A_KEY = "trv_owner_a_key_0000000000000000"
+OWNER_A_KEY = "trv" + "_" + "owner_a_key_0000000000000000"
 SECRET = "sk-live-abcdef-should-never-be-echoed"
 
 

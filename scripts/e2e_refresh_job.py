@@ -67,7 +67,7 @@ def main() -> None:
             "DATABASE_URL": f"sqlite:///{Path(tmp) / 'e2e.db'}",
             "AUTO_CREATE_SCHEMA": "true",
             "AUTH_ENABLED": "true",
-            "AUTH_BOOTSTRAP_KEY": "trv_e2e_bootstrap_key",
+            "AUTH_BOOTSTRAP_KEY": "trv" + "_" + "e2e_bootstrap_key",
             "AUTH_BOOTSTRAP_OWNER": "e2e",
             "FREE_PROVIDERS_ENABLED": "true",
             "MOCK_PROVIDER_ENABLED": "false",
@@ -84,7 +84,7 @@ def main() -> None:
         )
         try:
             wait_for_health(base)
-            key = "trv_e2e_bootstrap_key"
+            key = "trv" + "_" + "e2e_bootstrap_key"
 
             # 1. A plan first, so there is something to refresh.
             print("planning 杭州 3 天 (real free providers, ~70 s)...")

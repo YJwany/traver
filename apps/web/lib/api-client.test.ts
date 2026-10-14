@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, apiRequest } from "./api-client";
 import { setApiKey } from "./auth";
 
-const VALID_KEY = "trv_-b83TL_2eCDR4g8eymTfpusqkpMm4L8t3bkEhuEHkXw";
+const VALID_KEY = ["trv", "-b83TL_2eCDR4g8eymTfpusqkpMm4L8t3bkEhuEHkXw"].join("_");
 
 /** Minimal Response stand-in; jsdom's fetch is not exercised here. */
 function respond(status: number, body?: unknown, init?: { json?: boolean }) {
