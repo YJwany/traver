@@ -94,20 +94,26 @@ def test_every_declared_provider_name_is_actually_registered():
 
 
 def _credentialed_stack_names() -> set[str]:
-    """Names the credential-gated factory really produces, for the AMap source.
+    """Names the credential-gated factories really produce.
 
-    Uses a placeholder key: this asserts construction and naming, never a real call.
+    Uses placeholder keys: this asserts construction and naming, never a real call.
+    """
+    return {getattr(provider, "name", "") for provider in _credentialed_stack()}
+
+
+def _credentialed_stack() -> list:
+    """Every credential-gated provider this deployment can build, from the real factories.
+
+    Both sources, not just 高德: a manifest that declares a provider name is making a claim
+    about a factory, and the check is only as complete as the set of factories it runs.
     """
     from travel_api.providers.amap import build_amap_providers
+    from travel_api.providers.rollinggo import build_rollinggo_providers
 
-    providers = build_amap_providers(key="test-key-not-used-for-requests", http=object())
-    return {getattr(provider, "name", "") for provider in providers}
-
-
-def _amap_stack() -> list:
-    from travel_api.providers.amap import build_amap_providers
-
-    return build_amap_providers(key="test-key-not-used-for-requests", http=object())
+    return [
+        *build_amap_providers(key="test-key-not-used-for-requests", http=object()),
+        *build_rollinggo_providers(key="test-key-not-used-for-requests", http=object()),
+    ]
 
 
 def test_every_declared_capability_reaches_a_live_provider_that_implements_it():
@@ -126,7 +132,7 @@ def test_every_declared_capability_reaches_a_live_provider_that_implements_it():
     from travel_api.providers.registry import ProviderRegistry
 
     providers, _http = build_free_providers()
-    registry = ProviderRegistry([*providers, *_amap_stack()])
+    registry = ProviderRegistry([*providers, *_credentialed_stack()])
 
     unreachable: list[str] = []
     for manifest in PROVIDER_CATALOG:
@@ -673,24 +679,27 @@ def test_catalog_endpoint_reports_a_usable_deployment(tmp_path):
     # was counted as coverage. So the catalogue asserted that a deployment which cannot
     # obtain a room rate was fully covered — the test was pinning the bug.
     #
-    # Two gaps is the honest answer for this deployment: rates require a commercial hotel
-    # channel, and reviews require a source that publishes a score *with a date*. Neither is
-    # integrated, and neither can be produced by any keyless source. Everything else is served.
+    # "Uncovered" and "a gap" are now two different answers, and this deployment is what
+    # shows why. Rates are uncovered (nothing registered serves them) but *unlockable* —
+    # RollingGo declares the capability, so a key closes it — whereas reviews are uncovered
+    # and no catalogue entry can close them at all.
     assert payload["uncovered_capabilities"] == ["search_room_offers", "search_reviews"]
-    # And the gap is named with a reason, not just counted, so a reader learns what to plug
-    # in rather than having to diff the matrix against their expectations.
-    gap = next(
-        item for item in payload["capability_gaps"] if item["capability"] == "search_room_offers"
+    assert [item["capability"] for item in payload["capability_gaps"]] == ["search_reviews"], (
+        "房型与报价 is unlockable by a credential now, so reporting it as a gap no source can "
+        "close would send a reader hunting for something that already exists"
     )
-    assert gap["label"]
-    assert "估算" in gap["note"], "the note must say what happens instead of a real rate"
+    # The advice that used to sit in the gap note now lives on the source that closes it.
+    rollinggo = next(item for item in payload["providers"] if item["id"] == "rollinggo")
+    assert "search_room_offers" in rollinggo["capabilities"]
+    assert rollinggo["status"] == "needs_credentials"
+    assert rollinggo["missing_credentials"] == ["rollinggo_api_key"]
     # Every uncovered capability must carry a note. A nameless gap in the gap list is worse
     # than no gap list, because it reads as a rendering bug rather than as advice.
     for entry in payload["capability_gaps"]:
         assert entry["note"].strip(), f"{entry['capability']} is uncovered with no explanation"
     assert "openstreetmap" in payload["registered"]
     ids = {item["id"] for item in payload["providers"]}
-    assert {"openstreetmap", "amap", "openai-compatible"} <= ids
+    assert {"openstreetmap", "amap", "rollinggo", "openai-compatible"} <= ids
 
 
 def test_a_provider_that_always_returns_nothing_is_not_credited_with_coverage(tmp_path):

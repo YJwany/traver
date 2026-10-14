@@ -92,6 +92,45 @@ const AMAP_AS_DEPLOYED = {
   missing_credentials: ["amap_web_service_key"],
 };
 
+/**
+ * RollingGo exactly as `/api/v1/providers/catalog` reports it on an unconfigured deployment.
+ *
+ * The second source in this file whose *absence* from the fixture was itself the defect. With
+ * only `CATALOG` — which has no RollingGo entry — the screen's answer to "how do I get a real
+ * room rate" was never rendered, because `unlockHints` had no inactive source declaring
+ * `search_room_offers` to build the sentence from. Same shape as the 高德 gap documented above:
+ * a fixture that omits the source the advice is about cannot fail.
+ *
+ * `tests/unit/test_web_api_contract.py` compares this against the live API so it cannot drift.
+ */
+const ROLLINGGO_AS_DEPLOYED = {
+  id: "rollinggo",
+  label: "道旅 / RollingGo 酒店（MCP）",
+  kind: "data" as const,
+  // Not `planned`: the provider is implemented and reaches a real service. Only the credential
+  // is absent.
+  status: "needs_credentials",
+  capabilities: ["search_hotels", "search_room_offers"],
+  aspects: {},
+  cost_note: "个人 Key 免费，当前无调用量限制",
+  freshness_note: "按请求实时查询并如实标注抓取时间；不缓存",
+  docs_url: "https://rollinggo.store/docs/mcp-docs/quick-start",
+  caveats: ["未配置时住宿部分仍是估算额度并已标注"],
+  active: false,
+  credentials: [
+    {
+      key: "rollinggo_api_key",
+      label: "RollingGo API Key",
+      help: "在 rollinggo.store 自助申请个人 Key",
+      docs_url: "https://github.com/DIDA-AI/DIDA-Hotel-MCP-CN",
+      secret: true,
+      required: true,
+      configured: false,
+    },
+  ],
+  missing_credentials: ["rollinggo_api_key"],
+};
+
 const CATALOG: Catalog = {
   providers: [
     {
@@ -325,17 +364,13 @@ const CATALOG: Catalog = {
     "wikipedia",
     "openstreetmap-places",
   ],
-  // Room rates are genuinely uncovered: no keyless source can produce one, and no
-  // catalogue entry claims to. The fixture mirrors the real API so the render path is
-  // exercised rather than assumed.
+  // Room rates are genuinely uncovered — no keyless source can produce one — but they are no
+  // longer a *gap*: RollingGo declares the capability, so a key closes it and the server reports
+  // it through the unlock hint instead. Only reviews remain here, because no catalogue entry can
+  // serve them at all. The fixture mirrors the real API so the render path is exercised rather
+  // than assumed.
   uncovered_capabilities: ["search_room_offers", "search_reviews"],
   capability_gaps: [
-    {
-      capability: "search_room_offers",
-      label: "房型与报价",
-      note: "房型与实时房价只存在于商业酒店渠道（携程 / Booking 的开放接口），本工具尚未接入任何一家。因此预算里的住宿部分是估算额度。",
-      closable_by: "source",
-    },
     {
       capability: "search_reviews",
       label: "评价与评分",
@@ -450,32 +485,68 @@ describe("ProviderCatalog", () => {
     //
     // Second, and worse, the server used to report room rates as *fully covered by
     // OpenStreetMap*, because Overpass implements `search_room_offers` as a method that
-    // always returns an empty list. A catalogue must not advertise a capability that
-    // returns nothing, so the gap has to appear at all.
+    // always returns an empty list. A catalogue must not advertise a capability that returns
+    // nothing, so the gap had to appear at all.
+    //
+    // Room rates have since left this list — RollingGo declares the capability, so a key
+    // closes it and the server reports it as advice rather than as a dead end. Reviews are the
+    // one gap left, and its note still has to connect the missing capability to the field the
+    // reader is staring at.
     stubFetch(CATALOG);
     const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
 
-    expect(await screen.findByText("房型与报价", { selector: "strong" })).toBeInTheDocument();
-    // And it says what happens instead, so the reader connects it to the estimated
-    // accommodation line in the budget rather than hunting for a bug.
-    const rates = gapItems(container).find((node) => node.textContent?.includes("房型与报价"));
-    expect(rates).toBeDefined();
-    expect(rates!.textContent).toMatch(/没有任何已接入的来源能提供它/);
-    expect(rates!.textContent).toMatch(/估算额度/);
+    // Wait for the fetch to land before selecting: `gapItems` throws when the panel is absent,
+    // and the panel is absent until the catalogue arrives.
+    await screen.findByText("评价与评分", { selector: "strong" });
+
+    const reviews = gapItems(container).find((node) =>
+      node.textContent?.includes("评价与评分"),
+    );
+    expect(reviews).toBeDefined();
+    expect(reviews!.textContent).toMatch(/没有任何已接入的来源能提供它/);
+    expect(reviews!.textContent).toMatch(/评分字段始终为空/);
+
+    // And 房型与报价 must not be here: it is still uncovered, but it is unlockable, and the two
+    // lists have opposite remedies. Putting it back is the same lie told in the other direction.
+    expect(gapItems(container).some((node) => node.textContent?.includes("房型与报价"))).toBe(
+      false,
+    );
   });
 
   it("explains each uncovered capability in its own entry, not once for all of them", async () => {
     // Every gap gets its own reason. A single shared paragraph would be wrong the moment two
-    // capabilities are missing for different reasons, which is the case here: room rates need a
-    // commercial hotel channel, reviews need a source that publishes a score *with a date*.
-    stubFetch(CATALOG);
+    // capabilities are missing for different reasons.
+    //
+    // The payload is built here rather than taken from `CATALOG`, and that is deliberate: the
+    // current catalogue has exactly one *unclosable* gap (`search_reviews`), because RollingGo
+    // turned room rates into an unlockable one. The multi-entry rendering is still a contract of
+    // this component — a capability with no source and no declaring provider would produce it —
+    // so it is exercised with a payload that says so, instead of being left to be discovered in
+    // production the first time a second gap appears.
+    const twoGaps = {
+      ...CATALOG,
+      uncovered_capabilities: ["search_room_offers", "search_reviews"],
+      capability_gaps: [
+        {
+          capability: "search_room_offers",
+          label: "房型与报价",
+          note: "房型与实时房价没有任何已接入的来源能提供它，因此预算里的住宿部分是估算额度。",
+          closable_by: "source" as const,
+        },
+        {
+          capability: "search_reviews",
+          label: "评价与评分",
+          note: "评价与评分需要「带发布时间的意见」，因此酒店与餐厅的评分字段始终为空。",
+          closable_by: "source" as const,
+        },
+      ],
+    };
+    stubFetch(twoGaps);
     const { container } = render(<ProviderCatalog apiUrl="http://api.test" />);
 
     await screen.findByText("房型与报价", { selector: "strong" });
     const items = gapItems(container);
-    // The field is optional on the wire, so tsc is right to ask; this test's whole point is
-    // that it is present and populated.
-    const gaps = CATALOG.capability_gaps ?? [];
+    const gaps = twoGaps.capability_gaps;
     expect(gaps.length).toBeGreaterThan(1);
     expect(items).toHaveLength(gaps.length);
 
@@ -865,6 +936,47 @@ describe("ProviderCatalog", () => {
       expect(screen.queryByText(/可补：.*骑行/)).toBeNull();
       // The tool-only gap is still disclosed, about the tool rather than about 高德.
       expect(screen.getByText(/另有 1 项这个工具本身还不支持（骑行）/)).toBeInTheDocument();
+    });
+  });
+
+  describe("with RollingGo as the deployed server actually reports it", () => {
+    function deployedCatalog(): Catalog {
+      return {
+        ...CATALOG,
+        providers: [CATALOG.providers[0], CATALOG.providers[1], ROLLINGGO_AS_DEPLOYED],
+        registered: ["openstreetmap", "osrm"],
+      };
+    }
+
+    it("tells the reader that supplying a hotel key is what buys real room rates", async () => {
+      // The second sentence of this kind, guarding the same defect: with no RollingGo entry in
+      // the fixture, `unlockHints` had no inactive source declaring `search_room_offers`, so the
+      // screen's only answer to "how do I stop guessing the accommodation cost" was never
+      // rendered by any test.
+      //
+      // Asserted in the actionable bucket ("填入凭据后可提供") rather than the aspirational one
+      // ("接入后才会提供"), because the code is written and only the key is missing — getting the
+      // bucket wrong is the difference between advice a user can act on today and a promise
+      // about future work.
+      stubFetch(deployedCatalog());
+      render(<ProviderCatalog apiUrl="http://api.test" />);
+
+      expect(await screen.findByText(/填入凭据后可提供房型与报价/)).toBeInTheDocument();
+      expect(screen.queryByText(/接入后才会提供房型与报价/)).toBeNull();
+    });
+
+    it("shows the source as ready-but-unconfigured, never as unimplemented", async () => {
+      // `planned` is a factual claim about the code, and it would be false here: the provider
+      // exists and reaches a real service. "待配置" is the true state — the code is ready, the
+      // key is missing.
+      stubFetch(deployedCatalog());
+      render(<ProviderCatalog apiUrl="http://api.test" />);
+
+      await screen.findAllByText("道旅 / RollingGo 酒店（MCP）");
+      const scope = within(cardFor("道旅 / RollingGo 酒店（MCP）"));
+
+      expect(scope.getByText("待配置")).toBeInTheDocument();
+      expect(scope.queryByText("尚未实现")).toBeNull();
     });
   });
 

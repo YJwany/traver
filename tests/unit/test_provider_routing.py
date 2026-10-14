@@ -20,7 +20,7 @@ class HotelsOnly:
     async def search_hotels(self, profile):
         return ProviderResult(provider=self.name, data=["hotel"])
 
-    async def search_room_offers(self, hotel_ids, profile):
+    async def search_room_offers(self, hotels, profile):
         return ProviderResult(provider=self.name, data=["offer"])
 
 
@@ -43,7 +43,7 @@ class Everything:
     async def search_hotels(self, profile):
         return ProviderResult(provider=self.name)
 
-    async def search_room_offers(self, hotel_ids, profile):
+    async def search_room_offers(self, hotels, profile):
         return ProviderResult(provider=self.name)
 
     async def search_restaurants(self, profile):

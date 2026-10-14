@@ -30,6 +30,12 @@ from travel_api.providers.free.http import FreeHttpClient
 from travel_api.providers.mock import MockTravelProvider
 from travel_api.providers.registry import ProviderRegistry
 from travel_api.providers.resilience import ProviderCallPolicy, ProviderRuntime
+from travel_api.providers.rollinggo import (
+    ROLLINGGO_KEY_CREDENTIAL,
+    ROLLINGGO_PROVIDER_ID,
+    RollingGoKeyError,
+    build_rollinggo_providers,
+)
 from travel_api.services.auth import KEY_PREFIX, AuthenticationError, AuthService, hash_api_key
 from travel_api.services.budget_engine import BudgetEngine
 from travel_api.services.content_service import ContentIngestionService
@@ -283,6 +289,24 @@ def create_app(
                 retry_backoff_seconds=app_settings.free_provider_retry_backoff_seconds,
             )
 
+        # RollingGo gets its own client for the same reason 高德 does — borrowing the free
+        # stack's made a saved key depend on ``free_providers_enabled``, so switching the
+        # free sources off silently disabled the credential. It also needs its own limiter:
+        # a plan can issue one MCP call per candidate hotel, and the polite gap for a
+        # supply service is not the one the community endpoints need.
+        rollinggo_http_client = None
+        if app_settings.rollinggo_enabled:
+            rollinggo_host = httpx.URL(app_settings.rollinggo_base_url).host or "mcp.rollinggo.cn"
+            rollinggo_http_client = FreeHttpClient(
+                user_agent=app_settings.free_provider_user_agent,
+                timeout_seconds=app_settings.rollinggo_timeout_seconds,
+                host_intervals={
+                    rollinggo_host: 1.0 / max(app_settings.rollinggo_requests_per_second, 0.1),
+                },
+                retry_count=app_settings.free_provider_retry_count,
+                retry_backoff_seconds=app_settings.free_provider_retry_backoff_seconds,
+            )
+
         def credentialed_providers(owner_id: str | None) -> list[object]:
             """Sources that only exist for an owner who supplied a key.
 
@@ -292,28 +316,53 @@ def create_app(
 
             Returns an empty list when nothing is configured, which is the normal
             state: Traver plans complete trips with no credentials at all, so this is
-            an upgrade path rather than a requirement.
+            an upgrade path rather than a requirement. Each source is independent —
+            one unusable key must not withhold the other, so each is resolved and
+            built inside its own guard.
             """
-            if amap_http_client is None:
-                return []
-            key = credential_resolver.value(owner_id, AMAP_PROVIDER_ID, AMAP_KEY_CREDENTIAL)
-            if not key:
-                return []
-            try:
-                return build_amap_providers(
-                    key=key,
-                    http=amap_http_client,
-                    base_url=app_settings.amap_base_url,
-                    timeout_seconds=app_settings.free_provider_timeout_seconds,
-                    ttl_seconds=app_settings.amap_ttl_seconds,
-                    max_route_points=app_settings.amap_max_route_points,
+            providers: list[object] = []
+
+            if amap_http_client is not None:
+                amap_key = credential_resolver.value(
+                    owner_id, AMAP_PROVIDER_ID, AMAP_KEY_CREDENTIAL
                 )
-            except AmapKeyError:
-                # A stored value that is blank or whitespace. Treated as "not
-                # configured" so planning proceeds on the free sources rather than
-                # failing because of an unusable setting.
-                logger.warning("AMap credential for owner %r is unusable", owner_id)
-                return []
+                if amap_key:
+                    try:
+                        providers.extend(
+                            build_amap_providers(
+                                key=amap_key,
+                                http=amap_http_client,
+                                base_url=app_settings.amap_base_url,
+                                timeout_seconds=app_settings.free_provider_timeout_seconds,
+                                ttl_seconds=app_settings.amap_ttl_seconds,
+                                max_route_points=app_settings.amap_max_route_points,
+                            )
+                        )
+                    except AmapKeyError:
+                        # A stored value that is blank or whitespace. Treated as "not
+                        # configured" so planning proceeds on the free sources rather than
+                        # failing because of an unusable setting.
+                        logger.warning("AMap credential for owner %r is unusable", owner_id)
+
+            if rollinggo_http_client is not None:
+                rollinggo_key = credential_resolver.value(
+                    owner_id, ROLLINGGO_PROVIDER_ID, ROLLINGGO_KEY_CREDENTIAL
+                )
+                if rollinggo_key:
+                    try:
+                        providers.extend(
+                            build_rollinggo_providers(
+                                key=rollinggo_key,
+                                http=rollinggo_http_client,
+                                base_url=app_settings.rollinggo_base_url,
+                                timeout_seconds=app_settings.rollinggo_timeout_seconds,
+                                ttl_seconds=app_settings.rollinggo_ttl_seconds,
+                            )
+                        )
+                    except RollingGoKeyError:
+                        logger.warning("RollingGo credential for owner %r is unusable", owner_id)
+
+            return providers
 
         registry.set_credential_provider_factory(credentialed_providers)
         model_runtime = ModelRuntime(
@@ -369,6 +418,8 @@ def create_app(
                 await free_http_client.aclose()
             if amap_http_client is not None:
                 await amap_http_client.aclose()
+            if rollinggo_http_client is not None:
+                await rollinggo_http_client.aclose()
             database.engine.dispose()
 
     app = FastAPI(

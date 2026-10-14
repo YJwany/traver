@@ -34,6 +34,7 @@ from travel_api.providers.manifest import (
     PROVIDER_CATALOG,
     capability_gaps,
     capability_matrix,
+    manifest_for,
 )
 from travel_api.providers.registry import ProviderRegistry
 
@@ -164,18 +165,31 @@ def test_the_gap_is_named_and_explained():
     registered = [provider.name for provider in _free_providers()]
     gaps = capability_gaps(registered, _all_capabilities())
 
-    # Two gaps, and both are real for different reasons: no source quotes a room rate, and no
-    # source publishes a dated guest review. Neither is a configuration problem, so both
-    # belong here rather than in the unlock hints.
-    assert [gap["capability"] for gap in gaps] == ["search_room_offers", "search_reviews"]
+    # One gap remains, and it is the kind no source can close: nothing publishes a dated
+    # guest review, and no catalogue entry claims to.
+    #
+    # 房型与报价 used to be listed here as well and no longer is — RollingGo declares it, so
+    # it is now something a *credential* unlocks rather than something nothing can serve.
+    # The two have opposite remedies ("fill in a key" versus "this cannot be had yet"), which
+    # is exactly why the matrix reports them separately, and why adding a source has to move
+    # a capability from one list to the other rather than leaving both populated.
+    assert [gap["capability"] for gap in gaps] == ["search_reviews"]
 
-    hotel_gap = next(gap for gap in gaps if gap["capability"] == "search_room_offers")
-    assert hotel_gap["label"]
-    # The note must say what happens *instead*, so the reader connects it to the estimated
-    # accommodation line they will see in the budget rather than hunting for a bug.
-    assert "估算" in hotel_gap["note"]
-    assert "未接入" in hotel_gap["note"], (
-        "the note must be about what is integrated, not an impossibility"
+
+def test_the_room_rate_advice_moved_to_the_source_that_closes_it():
+    """The note is gone, but the advice it carried must not be.
+
+    The old gap note explained what happens *instead* of a real rate — the accommodation
+    line is an estimate and is labelled as one — so a reader could connect it to the number
+    they see rather than hunting for a bug. That sentence is still needed; it just belongs on
+    the manifest now, because the capability is unlockable and a "nothing can serve this"
+    note next to a source that can would be a new lie.
+    """
+    rollinggo = manifest_for("rollinggo")
+    assert rollinggo is not None
+    assert "search_room_offers" in rollinggo.capabilities
+    assert any("估算" in caveat for caveat in rollinggo.caveats), (
+        "the caveats must still say what happens instead of a real rate"
     )
 
 
@@ -286,8 +300,10 @@ def test_the_note_map_does_not_describe_a_solvable_gap():
         if entry.status in {"available", "needs_credentials"}
         for capability in entry.capabilities
     }
-    # `search_room_offers` is the one entry, and no catalogue entry may claim it — if one
-    # ever does, the note must be deleted rather than left contradicting the catalogue.
+    # ``search_room_offers`` used to be the one entry here. Adding the RollingGo manifest —
+    # which declares it — is what forced the note's deletion, and this assertion is what made
+    # that mandatory rather than optional. A future source that declares a capability still
+    # carrying a "nothing can serve this" note fails here instead of shipping a contradiction.
     for capability in CAPABILITY_GAP_NOTES:
         assert capability not in unlockable, (
             f"{capability} has a 'nothing can serve this' note but a source declares it"

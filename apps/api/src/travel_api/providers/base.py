@@ -4,6 +4,7 @@ from typing import Protocol, runtime_checkable
 
 from travel_api.domain.models import (
     Attraction,
+    Hotel,
     Pace,
     ProviderHealth,
     ProviderResult,
@@ -66,18 +67,31 @@ class HotelProvider(Protocol):
 
 @runtime_checkable
 class RoomOfferProvider(Protocol):
-    """Quotes room rates for hotels it did not necessarily discover.
+    """Quotes room rates for hotels the plan already contains.
 
     Separate from ``HotelProvider`` for the same reason: rates are a commercial
     capability that most sources lack, and lacking them must not disable hotel
     search. A source that has no rates is not broken — it is simply not asked for
     prices, and the budget layer marks those costs as estimates.
+
+    Takes the ``Hotel`` entities, not their ids, for the reason ``enrich_attractions``
+    takes ``Attraction`` entities: the hotels in a plan were discovered by *other*
+    sources, and the identity a supply source needs is not the one this program minted.
+    ``Hotel.id`` is a locally generated UUID (``uuid4``), so a supplier handed only that
+    string has nothing to look up with — no name, no coordinate, no id of its own. Its
+    correct behaviour (return no offers) is then indistinguishable from "this source has
+    no rates at all", which is exactly the silent gap this method was split out to
+    expose. Passing the entity lets a source read
+    ``hotel.source_references[*].source_id`` — the id *it* issued — or resolve by name
+    and location when the hotel came from somewhere else. The change was made before any
+    commercial source was wired in, precisely because a signature that cannot express
+    "price these hotels" cannot be fixed by adding a provider.
     """
 
     name: str
 
     async def search_room_offers(
-        self, hotel_ids: list[str], profile: TripProfile
+        self, hotels: list[Hotel], profile: TripProfile
     ) -> ProviderResult: ...
 
 

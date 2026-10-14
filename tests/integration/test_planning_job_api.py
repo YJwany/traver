@@ -17,11 +17,14 @@ Two details are deliberate and are asserted rather than assumed:
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
 from travel_api.config import Settings
 from travel_api.main import create_app
+from travel_api.services.owner_context import current_owner
+from travel_api.services.trip_service import TripNotFoundError
 
 
 @pytest.fixture
@@ -459,6 +462,49 @@ def test_refreshing_another_owners_trip_is_a_404_and_creates_no_job(client, app)
     assert client.get("/api/v1/planning/jobs", headers=_auth(owner_b)).json() == []
     # The owner's own trip is untouched.
     assert client.get(f"/api/v1/trips/{trip['id']}", headers=_auth(owner_a)).status_code == 200
+
+
+def test_the_explicit_owner_is_honoured_with_no_ambient_owner(client, app):
+    """The owner argument is the filter, not a hint that happens to agree with ambient state.
+
+    Found by a mutation harness: deleting ``owner_id=owner_id`` from ``queue_refresh``'s
+    ``self.get(...)`` **survived the whole suite**, including
+    ``test_refreshing_another_owners_trip_is_a_404_and_creates_no_job`` above.
+
+    The reason is not a missing guard in the route. ``main.py`` binds the ambient owner from the
+    bearer token for every authenticated request, and ``TripService.get`` resolves through
+    ``resolve_owner``, which falls back to that ambient value — so over HTTP the explicit
+    argument and the ambient one are always the same string and the two versions of the line are
+    genuinely equivalent. That is why no assertion could tell them apart.
+
+    They stop being equivalent the moment nothing is ambient: ``resolve_owner(None)`` is then
+    ``None``, ``None`` means *no filter* to the repository, and the lookup returns whatever trip
+    owns that id. That is the shape a background caller has — the job runner, a CLI, a scheduled
+    refresh — and it is the case this test creates on purpose, by calling the service directly
+    with no request in flight and no ambient owner bound.
+    """
+    owner_a, owner_b = _key(app, "owner-a"), _key(app, "owner-b")
+    trip = _create_trip(client, owner_a)
+
+    # The precondition the test is about. If a previous test leaked an ambient owner, this
+    # assertion is what says so, rather than the test passing for the wrong reason.
+    assert current_owner() is None, (
+        "an ambient owner is bound, so this test would not distinguish the explicit argument "
+        "from the fallback — which is the entire subject"
+    )
+
+    service = app.state.trip_service
+    with pytest.raises(TripNotFoundError):
+        service.queue_refresh(
+            UUID(trip["id"]),
+            owner_id=owner_b,
+            jobs=app.state.planning_jobs,
+        )
+
+    # And nothing was created for either owner, because it failed before a job existed.
+    registry = app.state.planning_jobs
+    assert registry.list_for_owner("owner-a") == []
+    assert registry.list_for_owner("owner-b") == []
 
 
 def test_a_refresh_job_reports_the_pipeline_steps_and_not_only_its_own(client, app):

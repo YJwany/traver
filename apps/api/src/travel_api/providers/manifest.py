@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from travel_api.providers.amap import AMAP_PROVIDER_NAMES
 from travel_api.providers.base import CAPABILITY_BY_METHOD
+from travel_api.providers.rollinggo import ROLLINGGO_PROVIDER_NAMES
 
 #: Human labels for the registry methods, used by the settings UI. Kept beside
 #: the manifests rather than in the Web app so adding a capability does not
@@ -374,6 +375,37 @@ PROVIDER_CATALOG: tuple[ProviderManifest, ...] = (
         ),
     ),
     ProviderManifest(
+        id="rollinggo",
+        label="道旅 / RollingGo 酒店（MCP）",
+        kind="data",
+        status=STATUS_NEEDS_CREDENTIALS,
+        # ``search_room_offers`` is declared here and nowhere else in this catalogue. That is
+        # what moves 房型与报价 from "no source can serve this" to "supply a key" — the two
+        # are different answers with different remedies, and this manifest is the difference.
+        capabilities=("search_hotels", "search_room_offers"),
+        credentials=(
+            CredentialField(
+                key="rollinggo_api_key",
+                label="RollingGo API Key",
+                help="在 rollinggo.store 自助申请个人 Key；用于酒店搜索与实时房型报价",
+                docs_url="https://github.com/DIDA-AI/DIDA-Hotel-MCP-CN",
+            ),
+        ),
+        provider_names=ROLLINGGO_PROVIDER_NAMES,
+        cost_note="个人 Key 免费，当前无调用量限制",
+        freshness_note="按请求实时查询并如实标注抓取时间；不缓存，报价每次规划都是实时请求",
+        docs_url="https://rollinggo.store/docs/mcp-docs/quick-start",
+        caveats=(
+            "这是本工具第一个能给出房型与实时房价的来源；未配置时住宿部分仍是估算额度并已标注",
+            "报价只贴到它自己发出的酒店上：别的来源找到的酒店不会被按名称匹配，"
+            "因为贴错酒店的报价与贴对的在外部看起来一样",
+            "来源不给「数据自身时间」，因此每条报价只标注抓取时间，观测依据记为 source_silent，"
+            "而不是把实时查询说成数据本身很新",
+            "「需申请」的房型不等于有房，不会被当成有库存",
+            "来源不提供住客评分，所以酒店评分仍然为空；评分需要同时给出发布时间的来源",
+        ),
+    ),
+    ProviderManifest(
         id="user-content",
         label="你自己提供的内容（小红书 / 抖音 / 美团 / 携程 / 同程等）",
         kind="content",
@@ -683,12 +715,14 @@ def capability_matrix(
 #: Only capabilities that *no* catalogue entry serves belong here. If some source could
 #: unlock it, the unlock hint already says so and a note would be redundant — worse, it
 #: would read as if nothing could, which is the opposite of the truth.
+#:
+#: ``search_room_offers`` used to be the first entry. It was deleted when RollingGo was
+#: added: the capability is now *unlockable by a credential*, and a "nothing can serve
+#: this" note sitting next to a source that can would be the same lie told in the other
+#: direction. Its advice lives on the manifest's caveats now, and
+#: ``test_the_note_map_does_not_describe_a_solvable_gap`` keeps the two sets disjoint so
+#: the note cannot come back while a source declares the capability.
 CAPABILITY_GAP_NOTES: dict[str, str] = {
-    "search_room_offers": (
-        "房型与实时房价只存在于商业酒店渠道（携程 / Booking / Expedia 的开放接口，或高德的酒店开放平台），"
-        "本工具尚未接入任何一家。因此预算里的住宿部分是估算额度，并已标注为估算——"
-        "它不会拿一个编造的房价冒充实时报价。"
-    ),
     "search_reviews": (
         "评价与评分需要「带发布时间的意见」，本工具尚未接入任何这样的来源。"
         "已有的免费来源都不提供：OpenStreetMap 的 stars 是自我声明的星级分类而不是住客评分，"

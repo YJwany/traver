@@ -62,6 +62,7 @@ Traver 本身不提供数据，也不绑定模型。这两件事都由使用者�
 - [export.md](export.md) — 导出：文档离开应用，所以必须自己交代生成时间、两个时间基准与无法判断的部分。
 - [content-ingestion.md](content-ingestion.md) — 内容摄取：你自己交进来的文字与其中的地名，以及为什么「没查过」不能写成「没找到」。
 - [presentation.md](presentation.md) — 展示层：位置示意图为什么不能画得像地图，以及那个把方框写死成成都的常量。
+- [hotel-supply-integration.md](hotel-supply-integration.md) — 酒店供应源接入：为什么接一个房价来源需要先改接口（现有契约的入参曾是 Traver 自己的 UUID），以及 RollingGo MCP 适配层的实现与**尚未对真实服务验证**的部分。
 
 设计原则是**渐进增强**：0 配置必须可用（免密钥数据源 + 本地确定性规划器），每接入一个源就解锁一批能力。不存在"必须先填 5 个 Key 才有输出"的情况。
 

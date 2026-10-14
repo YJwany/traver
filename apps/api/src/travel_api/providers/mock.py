@@ -133,12 +133,10 @@ class MockTravelProvider:
             source_references=[ref for hotel in hotels for ref in hotel.source_references],
         )
 
-    async def search_room_offers(
-        self, hotel_ids: list[str], profile: TripProfile
-    ) -> ProviderResult:
+    async def search_room_offers(self, hotels: list[Hotel], profile: TripProfile) -> ProviderResult:
         await asyncio.sleep(0)
         _, offers = build_hotels(self.name)
-        requested = {UUID(value) for value in hotel_ids}
+        requested = {hotel.id for hotel in hotels}
         selected = []
         for offer in offers:
             if offer.hotel_id in requested:

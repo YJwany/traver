@@ -69,17 +69,21 @@ class FixtureTravelProvider:
         refs = [ref for item in hotels for ref in item.source_references]
         return ProviderResult(provider=self.name, data=hotels, source_references=refs)
 
-    async def search_room_offers(
-        self, hotel_ids: list[str], profile: TripProfile
-    ) -> ProviderResult:
-        requested = {str(value) for value in hotel_ids}
-        hotels_by_source = {
-            row["source_id"]: self._hotel_id(row) for row in self.loader.records("hotels")
-        }
+    async def search_room_offers(self, hotels: list[Hotel], profile: TripProfile) -> ProviderResult:
+        # Which of *our* hotels each external id belongs to, read from the entities we were
+        # handed rather than re-derived from the fixtures. That is the contract this method
+        # now has, and it is the only way a source that issued its own ids can resolve them:
+        # ``Hotel.id`` is a local UUID, so the fixture's own ``hotel_source_id`` would be
+        # unmatchable if the ids did not travel on the hotel's source references.
+        by_source: dict[str, Any] = {}
+        for hotel in hotels:
+            for reference in hotel.source_references:
+                by_source.setdefault(reference.source_id, hotel.id)
+
         offers = []
         for row in self.loader.records("hotel_offers"):
-            hotel_id = hotels_by_source.get(row["hotel_source_id"])
-            if hotel_id is None or str(hotel_id) not in requested:
+            hotel_id = by_source.get(row["hotel_source_id"])
+            if hotel_id is None:
                 continue
             reference = self._reference(row, DataDomain.COMMERCIAL_FACT, ttl_minutes=5)
             offers.append(

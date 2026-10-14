@@ -781,3 +781,112 @@ def test_the_matrix_fixture_lists_every_capability_the_server_sends(tmp_path):
         f"the fixture names {missing_rows} as uncovered but gives them no matrix row, so the "
         "panel and the matrix disagree about what exists"
     )
+
+
+def _ts_gap_capabilities(source: str) -> list[str]:
+    """The ``capability`` ids inside the fixture's ``capability_gaps`` array.
+
+    Not ``_ts_string_array``: in this array ``capability`` is a scalar field of each entry, not
+    an array, so the array-shaped helper finds nothing.
+    """
+    start = source.index("capability_gaps: [")
+    end = source.index("\n  ],", start)
+    return re.findall(r'capability:\s*"([a-z_]+)"', source[start:end])
+
+
+def test_the_room_rate_fixture_matches_the_source_that_unlocks_it(tmp_path):
+    """RollingGo's fixture must be the shape the server sends, for the reason 高德's must.
+
+    The defect is the same one documented above: with no RollingGo entry in the settings-page
+    fixture, ``unlockHints`` had no inactive source declaring ``search_room_offers``, so the
+    screen's only answer to "how do I stop guessing the accommodation cost" was never rendered
+    by any test. A fixture that omits the source the advice is about cannot fail.
+    """
+    from fastapi.testclient import TestClient
+    from travel_api.config import Settings
+    from travel_api.main import create_app
+
+    source = CATALOG_TEST.read_text(encoding="utf-8")
+    start = source.index("const ROLLINGGO_AS_DEPLOYED")
+    end = source.index("\n};", start)
+    deployed = source[start:end]
+
+    assert 'status: "needs_credentials"' in deployed, (
+        "the deployed RollingGo fixture must carry the status the server reports; `planned` is "
+        "the pre-implementation state and claiming it makes the screen describe code that does "
+        "not exist. Asserted on the fixture itself, not only on the server's value below — a "
+        "comparison that only reads the server cannot see the copy drift."
+    )
+
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                database_url=f"sqlite:///{tmp_path / 'rollinggo-contract.db'}",
+                auto_create_schema=True,
+                auth_enabled=False,
+                free_providers_enabled=True,
+                mock_provider_enabled=False,
+                provider_fixture_dir=None,
+            )
+        )
+    ) as client:
+        response = client.get("/api/v1/providers/catalog")
+    assert response.status_code == 200, response.text
+    catalog = response.json()
+
+    real = next(item for item in catalog["providers"] if item["id"] == "rollinggo")
+    assert real["status"] == "needs_credentials", (
+        "this test assumes an unconfigured deployment; if RollingGo reports itself differently "
+        "now, update the fixture and this expectation together"
+    )
+    assert _ts_string_array(deployed, "capabilities") == real["capabilities"], (
+        "the fixture and the server disagree about which capabilities RollingGo provides"
+    )
+    assert _ts_string_array(deployed, "missing_credentials") == real["missing_credentials"]
+
+
+def test_the_fixture_gap_list_names_exactly_the_gaps_the_server_reports(tmp_path):
+    """The drift this actually hit, and the check that would have caught it.
+
+    The fixture's ``capability_gaps`` listed room rates as a dead end. The server stopped saying
+    that the moment RollingGo was added — the capability became *unlockable*, which is a
+    different list with a different remedy — and nothing noticed, because the contract test above
+    compared the matrix *rows* and never this list.
+
+    The ids are compared, not the notes: the fixture legitimately shortens note text, so
+    comparing prose would fail for a reason that is not a drift. Which capabilities are gaps is
+    the part that must agree, because that is what decides what the screen tells the reader to do.
+    """
+    from fastapi.testclient import TestClient
+    from travel_api.config import Settings
+    from travel_api.main import create_app
+
+    source = CATALOG_TEST.read_text(encoding="utf-8")
+    fixture_gaps = _ts_gap_capabilities(source)
+    assert fixture_gaps, "could not parse any capability_gaps out of the fixture"
+
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                database_url=f"sqlite:///{tmp_path / 'gap-contract.db'}",
+                auto_create_schema=True,
+                auth_enabled=False,
+                free_providers_enabled=True,
+                mock_provider_enabled=False,
+                provider_fixture_dir=None,
+            )
+        )
+    ) as client:
+        response = client.get("/api/v1/providers/catalog")
+    assert response.status_code == 200, response.text
+
+    server_gaps = [gap["capability"] for gap in response.json()["capability_gaps"]]
+    assert fixture_gaps == server_gaps, (
+        "the settings-page fixture's gap list has drifted from the server's. A gap that no "
+        "longer exists is advice the reader cannot act on; a missing one is a dead end they "
+        "will not be told about.\n"
+        f"  fixture only: {[g for g in fixture_gaps if g not in server_gaps]}\n"
+        f"  server only:  {[g for g in server_gaps if g not in fixture_gaps]}"
+    )

@@ -75,11 +75,13 @@ assert payload["uncovered_capabilities"] == [], (
 
 ```json
 {
-  "capability": "search_room_offers",
-  "label": "房型与报价",
-  "note": "房型与实时房价只存在于商业酒店渠道（携程 / Booking / Expedia 的开放接口，或高德的酒店开放平台），本工具尚未接入任何一家。因此预算里的住宿部分是估算额度，并已标注为估算——它不会拿一个编造的房价冒充实时报价。"
+  "capability": "search_reviews",
+  "label": "评价与评分",
+  "note": "评价与评分需要「带发布时间的意见」，本工具尚未接入任何这样的来源。已有的免费来源都不提供：OpenStreetMap 的 stars 是自我声明的星级分类而不是住客评分，高德把 rating / review_count 明确列在 absent_fields 里。因此酒店与餐厅的评分字段始终为空，而不是默认值。要补上需要接入一个提供评分与发布时间的来源（Google Places / TripAdvisor / 大众点评的开放接口）。注意：只有分数没有日期是不够的——攻略面向未来，一条几年前的「4.8 分」和上个月的「4.8 分」是同一个数字、两件不同的事，所以接入时必须同时提供发布时间。"
 }
 ```
+
+（`search_room_offers` 曾经是这个例子。加入 RollingGo 后它不再属于 `capability_gaps`，见下文「顺带一提：高德的房型」。）
 
 两者分开是刻意的：**「没人能提供」和「你还没配置」的补救方式完全相反**。公交地铁属于后者——高德能提供，只差一个 Key，所以它走 `uncovered_aspects` ＋ 解锁提示，绝不出现在 `capability_gaps` 里。把可解的缺口标成死局，等于让用户放弃一个 Key 就能解决的事。
 
@@ -176,7 +178,11 @@ assert payload["uncovered_capabilities"] == [], (
 
 ## 顺带一提：高德的房型
 
-高德的 Web 服务 API **不提供**房型与实时房价（POI 搜索返回的数据里没有房价/评分/评论数/门票价）。要拿到房价需要接入商业酒店渠道。所以 `search_room_offers` 在当前 catalogue 里**没有**任何 `needs_credentials` 的候选——这也是为什么它进的是 `capability_gaps` 而不是解锁提示。
+高德的 Web 服务 API **不提供**房型与实时房价（POI 搜索返回的数据里没有房价/评分/评论数/门票价）。要拿到房价需要接入商业酒店渠道，所以高德不声明 `search_room_offers`。
+
+**这一段曾经得出一个现在已不成立的结论。** 原文写的是「`search_room_offers` 在当前 catalogue 里**没有**任何 `needs_credentials` 的候选——这也是为什么它进的是 `capability_gaps` 而不是解锁提示」。接入 RollingGo（道旅）之后不再如此：它声明 `search_room_offers`、状态是 `needs_credentials`，所以房型报价从「没人能提供」**变成了解锁提示**，`CAPABILITY_GAP_NOTES` 里对应的那条也随之删除（留着就是反方向的新谎言）。
+
+这恰好说明两个列表为什么必须分开：同一个能力，缺来源和缺凭据的补救方式相反，而**接一个来源就会让它换一个列表**。设计与实施见 [hotel-supply-integration.md](hotel-supply-integration.md)。
 
 ## 第二个缺口：评价与评分
 

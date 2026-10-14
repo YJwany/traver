@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -129,15 +130,8 @@ class FreeHttpClient:
         return self._limiters[host]
 
     # -- requests ----------------------------------------------------------
-    async def request_json(
-        self,
-        method: str,
-        url: str,
-        *,
-        params: dict[str, Any] | None = None,
-        data: dict[str, Any] | None = None,
-    ) -> Any:
-        """Perform one logical request, retrying transient failures.
+    async def _retrying(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one logical request, retrying transient failures.
 
         Raises ProviderTransientError for retryable conditions and
         ProviderPermanentError otherwise. Permanent errors are never retried:
@@ -146,7 +140,7 @@ class FreeHttpClient:
         last_error: ProviderTransientError | None = None
         for attempt in range(self.retry_count + 1):
             try:
-                return await self._attempt_json(method, url, params=params, data=data)
+                return await operation()
             except ProviderTransientError as exc:
                 last_error = exc
                 if attempt >= self.retry_count:
@@ -159,7 +153,7 @@ class FreeHttpClient:
         assert last_error is not None
         raise last_error
 
-    async def _attempt_json(
+    async def request_json(
         self,
         method: str,
         url: str,
@@ -167,10 +161,59 @@ class FreeHttpClient:
         params: dict[str, Any] | None = None,
         data: dict[str, Any] | None = None,
     ) -> Any:
+        """Perform one logical request and parse the body as JSON."""
+
+        async def _call() -> Any:
+            response = await self._attempt_response(method, url, params=params, data=data)
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ProviderPermanentError(f"{url} returned a non-JSON body") from exc
+
+        return await self._retrying(_call)
+
+    async def request_raw(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """One logical request, retried on transient failure, body left unparsed.
+
+        Needed for a service that does not answer ``application/json``. An MCP server
+        replies with ``text/event-stream``, and ``response.json()`` on that body raises
+        even though the request succeeded — so a caller that must read the raw text, or
+        set a header the client does not default to, has no way through
+        :meth:`request_json`.
+        """
+
+        async def _call() -> httpx.Response:
+            return await self._attempt_response(
+                method, url, params=params, data=data, json_body=json_body, headers=headers
+            )
+
+        return await self._retrying(_call)
+
+    async def _attempt_response(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         await self.limiter_for(url).acquire()
         client = self._get_client()
         try:
-            response = await client.request(method, url, params=params, data=data)
+            response = await client.request(
+                method, url, params=params, data=data, json=json_body, headers=headers
+            )
         except httpx.TimeoutException as exc:
             raise ProviderTransientError(f"{url} timed out: {type(exc).__name__}: {exc!r}") from exc
         except httpx.TransportError as exc:
@@ -190,10 +233,7 @@ class FreeHttpClient:
             raise ProviderPermanentError(
                 f"{url} returned status {response.status_code}: {response.text[:200]}"
             )
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise ProviderPermanentError(f"{url} returned a non-JSON body") from exc
+        return response
 
     async def get_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
         return await self.request_json("GET", url, params=params)

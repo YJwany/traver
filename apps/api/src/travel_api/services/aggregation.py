@@ -453,17 +453,18 @@ async def build_preview(
     await reporter.finish_step()
 
     hotels = deduplicate_hotels(normalize_hotels(_collect(hotel_results, Hotel)))
-    hotel_ids = [str(hotel.id) for hotel in hotels]
     # Announced even when there is nothing to ask, so the step list is the same shape on
     # every run and a missing step cannot be misread as a silent failure.
     await reporter.step(
         "room_offers",
-        f"{len(hotel_ids)} 家酒店" if hotel_ids else "无候选酒店，跳过",
+        f"{len(hotels)} 家酒店" if hotels else "无候选酒店，跳过",
     )
+    # Pass the hotels themselves, not their ids. A supply source resolves its own hotel id
+    # from ``hotel.source_references`` — or by name and location when the hotel came from
+    # another source — and ``Hotel.id`` is a locally generated UUID that means nothing to it.
+    # See ``RoomOfferProvider`` for why this argument is an entity.
     offer_results = (
-        await _call_capability(registry, "search_room_offers", hotel_ids, profile)
-        if hotel_ids
-        else []
+        await _call_capability(registry, "search_room_offers", hotels, profile) if hotels else []
     )
     offers = _collect(offer_results, HotelOffer)
     await reporter.finish_step()

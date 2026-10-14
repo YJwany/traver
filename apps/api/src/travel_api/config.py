@@ -127,6 +127,27 @@ class Settings(BaseSettings):
     #: tripping the per-second guard AMap also enforces.
     amap_requests_per_second: float = 5.0
 
+    # -- RollingGo / 道旅 -------------------------------------------------
+    #: Whether owners may plug in a RollingGo key. Off means the catalogue still lists
+    #: the source but no credentialed provider is ever built, so an operator can
+    #: withdraw it without editing code.
+    rollinggo_enabled: bool = True
+    #: The MCP endpoint. RollingGo exposes hotel search and live rates over MCP
+    #: (streamable-HTTP) rather than REST, so this program speaks JSON-RPC to it.
+    #: Overridable for a proxy or an offline test double.
+    rollinggo_base_url: str = "https://mcp.rollinggo.cn/mcp"
+    #: Budget for one MCP tool call. No session handshake is issued, so this is the cost
+    #: of a single invocation rather than of a session.
+    rollinggo_timeout_seconds: float = 30.0
+    #: Requests per second against the MCP host. The service publishes no rate limit and
+    #: currently advertises no call cap, so this is a politeness guard rather than a
+    #: compliance number — kept low because a plan can issue one call per candidate hotel.
+    rollinggo_requests_per_second: float = 2.0
+    #: Lifetime stamped on a rate. Minutes rather than hours: a room rate is a perishable
+    #: commercial fact. Nothing is cached — every plan re-queries live — so this only
+    #: bounds how long a persisted snapshot may still be shown as current.
+    rollinggo_ttl_seconds: int = 1800
+
     auto_create_schema: bool = True
 
     # -- Authentication ----------------------------------------------------

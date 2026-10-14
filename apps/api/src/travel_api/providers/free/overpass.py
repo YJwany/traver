@@ -443,9 +443,7 @@ class OverpassPoiProvider:
     #: can produce one.
     UNSERVED_CAPABILITIES = frozenset({"search_room_offers"})
 
-    async def search_room_offers(
-        self, hotel_ids: list[str], profile: TripProfile
-    ) -> ProviderResult:
+    async def search_room_offers(self, hotels: list[Hotel], profile: TripProfile) -> ProviderResult:
         # OpenStreetMap carries no rates or availability. Returning an empty
         # success keeps the hotel component explicitly estimated downstream
         # instead of inventing a price.

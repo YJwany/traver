@@ -20,7 +20,7 @@ async def test_fixture_provider_maps_json_to_domain_models():
     )
 
     hotels = await provider.search_hotels(profile)
-    offers = await provider.search_room_offers([str(hotels.data[0].id)], profile)
+    offers = await provider.search_room_offers([hotels.data[0]], profile)
     restaurants = await provider.search_restaurants(profile)
 
     assert FixtureLoader(root).records("hotels")

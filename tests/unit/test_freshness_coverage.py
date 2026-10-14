@@ -108,10 +108,8 @@ class _AncientProvider:
     async def search_restaurants(self, profile: TripProfile) -> ProviderResult:
         return await self._wrap("search_restaurants", profile)
 
-    async def search_room_offers(
-        self, hotel_ids: list[str], profile: TripProfile
-    ) -> ProviderResult:
-        return await self._wrap("search_room_offers", hotel_ids, profile)
+    async def search_room_offers(self, hotels: list[Any], profile: TripProfile) -> ProviderResult:
+        return await self._wrap("search_room_offers", hotels, profile)
 
     async def search_weather(self, profile: TripProfile) -> ProviderResult:
         ref = _ancient_reference(self.name, "search_weather")
