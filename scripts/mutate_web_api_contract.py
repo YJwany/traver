@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = pathlib.Path(r"C:\Users\27875\Desktop\Traver")
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 TARGET = ROOT / "apps" / "web" / "app" / "components" / "plan-form.tsx"
 TEST = "tests/unit/test_web_api_contract.py"
 

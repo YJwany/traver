@@ -216,3 +216,23 @@ python -m pytest tests/integration/test_free_providers_live.py -q -s
 详见 docs/architecture/README.md。真实平台接入必须通过 Provider 实现，不能让平台 API 渗透进 Travel Engine，也不能用未经授权的网页抓取代替正式接口。
 
 免费数据源的实现细节与合规数值见 [docs/providers/free-sources.md](docs/providers/free-sources.md)。
+
+## 贡献
+
+Issue 与 PR 都欢迎。提交前请确认这几条全绿：
+
+```powershell
+python -m ruff format --check .
+python -m ruff check .
+python -m pytest tests/ -q
+```
+
+涉及数据来源的改动，请同时更新 `docs/providers/` 下对应文档，并说明该来源的许可条款是否允许本项目用途——这条判据曾否决过技术可用的来源（见上文「数据来源」一节）。
+
+设计决策、已知未验证项与踩过的坑记在 [HANDOVER.md](HANDOVER.md)，改动前值得先读一遍，尤其是「未验证」清单。
+
+## 许可
+
+[MIT](LICENSE)。
+
+内置的第三方数据来源各有自己的许可（ODbL 1.0 / CC BY 4.0 / CC BY-SA 4.0 等），署名与速率约束见 [docs/providers/free-sources.md](docs/providers/free-sources.md)，并通过 `GET /api/v1/providers/attributions` 对外暴露。**部署本项目的服务必须展示这些署名。**

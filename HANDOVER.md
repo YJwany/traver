@@ -1,7 +1,7 @@
-# Traver 交接文档
+# Traver 工程笔记
 
-> 生成时间：本文件最后写入时。**所有"已验证"的数字都是本轮实际跑出来的**，不是回忆；
-> 没有验证的一律标注为未验证。
+> 这份文档记录设计决策、踩过的坑，以及**哪些还没验证过**。
+> 所有标「已验证」的数字都是实际跑出来的，不是回忆；没有验证的一律标注为未验证。
 
 ---
 
@@ -10,16 +10,14 @@
 **用一句话**：Traver 是一个「自带密钥、插件化」的旅行规划聚合工具 —— 它自己不含数据，
 所有数据源（高德 / OSM / 天气 / OSRM / 小红书……）和 AI 模型都由使用者自己接。
 
-用户原话（产品身份，贯穿所有决策）：
+产品定位贯穿所有决策：
 
-> 咱们目前做的其实跟旅途星辰差不多就是一个相当于汇总的工具，里面的模型以及各种api都需要自己接……
-> 这就是一套工具，然后需要什么都需要自己接。
+- 它是一套**汇总工具**，不是数据供应商 —— 需要什么就接什么。
+- **渐进增强**：接得越多，安排越详细；什么都不接也仍然能出一份可用的行程，只是质量差一些。
 
-> 你提供的越多那么安排的就越详细，提供的少也会有攻略只不过要差一点。
+功能对标：旅途星辰（`1sdv/TripStar`）。**没有拷贝过它的任何代码**，只是功能对标。
 
-对标对象：旅途星辰（`1sdv/TripStar`）。**没有拷贝过它的任何代码**，只是功能对标。
-
-### 三条硬性要求（用户明确说过，优先级最高）
+### 三条硬性要求（优先级最高）
 
 1. **时效性** ——「旅游做攻略肯定都是针对于未来的，只能用近期的评价或者什么都是近期的，
    不能是那种几年前那种」。
@@ -33,16 +31,21 @@
 
 ## 2. 仓库与运行方式（全部已验证）
 
-- 仓库：`https://github.com/YJwany/traver`（private），分支 `main`，用户 `YJwany`
-- 工作目录：`C:\Users\27875\Desktop\Traver`
+- 仓库：`https://github.com/YJwany/traver`，分支 `main`
+- 下文命令均假定你在**仓库根目录**
 
-### 环境约定（PowerShell）
+### 环境约定
+
+```bash
+export PYTHONUTF8=1
+export PYTHONPATH="$PWD/apps/api/src"
+```
+
+Windows PowerShell：
 
 ```powershell
 $env:PYTHONUTF8='1'
-$env:PYTHONPATH='C:\Users\27875\Desktop\Traver\apps\api\src'
-# 需要 gh / npm / npx 时，前面补上 PATH：
-$env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
+$env:PYTHONPATH="$PWD\apps\api\src"
 ```
 
 ### 后端
@@ -72,35 +75,19 @@ alembic 漂移检查通过（跑完记得删掉工作区根目录生成的 `loca
 
 ---
 
-## 3. 当前 git 状态 —— ⚠️ 有 5 个提交没推上去
+## 3. 当前状态
 
-**原因：网络出口不通。** `Test-NetConnection github.com -Port 443` → `False`，
-`Invoke-WebRequest` 对 `github.com` / `api.github.com` / `pypi.org` 都失败，
-`git push` 报 `schannel: failed to receive handshake`。
+`main` 与 `origin/main` 一致，工作树干净。CI 在 `main` 的每次 push 与每个 PR 上运行。
 
-未推送（都在本地 `main`）：
-
-| commit | 内容 |
+| 项 | 状态 |
 | --- | --- |
-| `ea37a2c` | 按**模式**而不是配速推算时长（走路 4.5 / 公交地铁 15 / 打车驾车 24 km/h） |
-| `774919b` | 让 mutation harness 无法把变异泄漏到源码里 |
-| `27c0f6e` | 让五个预算策略真正产生差异 |
-| `0da3dbb` | 没有评分来源时不再写 `0.0` |
-| `d948a3d` | 两个"会过期"的测试 + 时钟平移检测工具 |
+| 后端测试 | 1020 passed, 8 skipped（需要真实网络的 e2e 默认跳过） |
+| 前端测试 | 232 passed（16 files） |
+| `ruff format` / `ruff check` | 通过 |
+| `tsc --noEmit` / `next lint` / `next build` | 通过 |
+| CI | 3 个 job（API / Migrations / Web）+ schema drift 检查 + 前端产物密钥扫描 |
 
-`origin/main` 停在 `163d8e3`（"Give reviews a date, because the requirement was about dates"）。
-**网络恢复后第一件事：`git push`。** 注意 `git push` 在 pwsh 下会打 `[exit code: 1]`
-但其实成功 —— 看有没有 `main -> main` 那行。
-
-**⚠️ 工作树现在并不干净**（2026-10-14 更正：之前这份文档写的"工作树干净"当时就已经不对）。
-未提交的内容包括本轮的 RollingGo 接入，以及更早遗留的一处：
-
-- `M tests/integration/test_planning_job_api.py` —— 新增
-  `test_the_explicit_owner_is_honoured_with_no_ambient_owner`（mutation harness 发现的缺口）
-- 本轮的改动见 §13
-- `HANDOVER.md` 自身**未被 git 跟踪**（`?? HANDOVER.md`）
-
-提交前请先确认这两部分是要一起提交还是分开。
+**尚未验证的部分集中列在 §8**，不要把它们当成已完成。
 
 ---
 
@@ -381,18 +368,18 @@ python -m pytest tests/ -q -p clock_shift_plugin
 
 ---
 
-## 10. PowerShell / 工具陷阱（踩过的）
+## 10. Windows 开发环境注意事项（踩过的）
 
-| 陷阱 | 正确做法 |
+| 现象 | 处理 |
 | --- | --- |
-| `python - <<'PY'` heredoc | **pwsh 不支持**。用 `write` 工具写临时脚本再跑 |
-| `Select-String -Path` 遇到含 `[id]` 的路径 | 报"字符串缺少终止符"。用 `grep` 工具 |
-| `gh run view --json jobs --jq '...'` | `--jq` 表达式被按空格拆开 → `accepts at most 1 arg(s)`。用 `gh run list --limit N --json ...` |
-| `git push` 打 `[exit code: 1]` | stderr 的噪音，其实成功了。看 `main -> main` 行 |
-| CRLF 警告 | `core.autocrlf=true`，几乎每个 .py 都会警告。确认是否真有改动：`git diff --ignore-all-space <file> \| Measure-Object -Line`，0 行 = 只是行尾 |
-| 控制台显示中文乱码 | `Get-Content` 的显示问题，`read` 工具的字节级读取才是权威 |
-| `Out-File -Encoding utf8` 写 commit message | 会带 BOM。用 `write` 工具写到 `.git/COMMIT_MSG_*.txt` 再 `git commit -F` |
-| 含中文的文件 | **一律用 `edit`/`write` 工具**，不要用 pwsh 重定向 |
+| `python - <<'PY'` heredoc 不生效 | PowerShell 不支持 heredoc。写成临时 `.py` 文件再跑 |
+| `Select-String -Path` 遇到含 `[id]` 的路径 | 报"字符串缺少终止符"。改用 `rg` / `grep` |
+| `gh run view --json jobs --jq '...'` | `--jq` 表达式被按空格拆开 → `accepts at most 1 arg(s)`。改用 `gh run list --limit N --json ...` |
+| `git push` 打 `[exit code: 1]` | 常常只是 stderr 噪音，实际成功了。看有没有 `main -> main` 行 |
+| CRLF 警告 | `core.autocrlf=true`，几乎每个 `.py` 都会警告。确认是否真有改动：`git diff --ignore-all-space <file> \| Measure-Object -Line`，0 行 = 只是行尾 |
+| 控制台显示中文乱码 | 多为 `Get-Content` 的显示问题，文件本身没坏。用字节级读取确认 |
+| `Out-File -Encoding utf8` 写 commit message | 会带 BOM。改写进 `.git/COMMIT_MSG_*.txt` 再用 `git commit -F` |
+| 含中文的文件被 PowerShell 重定向改写 | `Get-Content` / `Set-Content` 往返会按 ANSI 代码页读 UTF-8，中文全毁。用编辑器或 Python 直接写 |
 
 ### 其他技术约定
 
@@ -410,13 +397,12 @@ python -m pytest tests/ -q -p clock_shift_plugin
 
 ## 11. 下一步建议（按价值排序）
 
-1. **网络恢复后立刻 `git push`**（5 个提交，都已验证）
-2. 用真实高德 Key 跑 `probe_amap_transit_shape.py` —— 公交/地铁是要求 2 的核心，
+1. 用真实高德 Key 跑 `probe_amap_transit_shape.py` —— 公交/地铁是硬性要求 2 的核心，
    而它从未对真实服务验证过
-3. 把 `apps/web` 的 API key 从 `localStorage` 挪走
-4. 决定 `LICENSE`
-5. 多城市 / i18n（第 7 项剩下的两个明确缺失的能力）
-6. 补 §8 里列的测试缺口，优先 `trips/[id]/page.tsx` 相关逻辑
+2. 把 `apps/web` 的 API key 从 `localStorage` 挪走
+3. 多城市 / i18n（第 7 项剩下的两个明确缺失的能力）
+4. 补 §8 里列的测试缺口，优先 `trips/[id]/page.tsx` 相关逻辑
+5. 第二个酒店来源与跨源实体解析（见 §13）
 
 ---
 
@@ -424,7 +410,7 @@ python -m pytest tests/ -q -p clock_shift_plugin
 
 **事实纪律**：不吹嘘、不编造数据。具体到可执行的程度：
 
-- 没验证的就说没验证。§8 里那些"未验证"是真未验证，不要在下一次对话里变成"已完成"
+- 没验证的就说没验证。§8 里那些"未验证"是真未验证，不要在下一次改动里变成"已完成"
 - 数据永远带抓取时间；不知道就说不知道（`SOURCE_SILENT` 路径），
   **绝不用一个看起来合理的默认值填上**
 - 估算和实测必须分开标注（`is_estimate`、`ObservationBasis`）
@@ -436,8 +422,8 @@ python -m pytest tests/ -q -p clock_shift_plugin
 
 ## 13. 本轮新增（2026-10-14）：酒店供应源接入（阶段 1 + 阶段 2）
 
-背景：`search_room_offers` 此前**没有任何来源**，住宿部分永远是估算额度。用户要求找
-GitHub 上的酒店价格方案，并选定「国内强」的 **道旅 / RollingGo**（MCP 形态，个人 Key 自助申请）。
+背景：`search_room_offers` 此前**没有任何来源**，住宿部分永远是估算额度。为此选定了
+「国内强」的 **道旅 / RollingGo**（MCP 形态，个人 Key 自助申请）。
 
 完整设计与状态见 [docs/architecture/hotel-supply-integration.md](docs/architecture/hotel-supply-integration.md)。
 
@@ -476,7 +462,7 @@ GitHub 上的酒店价格方案，并选定「国内强」的 **道旅 / Rolling
 ### 前端：设置页 fixture 的漂移（这一处差点漏掉）
 
 `apps/web/app/components/provider-catalog.test.tsx` 里有一份手写的「服务端会发什么」副本，
-由 `tests/unit/test_web_api_contract.py` 与真实响应比对。**这份副本在我改完后端之后变成假的**：
+由 `tests/unit/test_web_api_contract.py` 与真实响应比对。**这份副本在后端改完之后变成假的**：
 
 - `CATALOG.capability_gaps` 里还挂着「房型与报价 = 死局」——服务端已经不再这么说了
   （RollingGo 让它变成「填 Key 可解锁」）
@@ -489,7 +475,7 @@ GitHub 上的酒店价格方案，并选定「国内强」的 **道旅 / Rolling
 （比对 gap 的 **id 集合**，不比对文案——fixture 的 note 是合法简写）。
 
 守卫验证：`scripts/mutate_catalog_fixture.py`，3 个变异全部被抓。
-其中 **M2 第一次没被抓**（把 fixture 的 `status` 改回 `planned`），因为我的断言只读了
+其中 **M2 第一次没被抓**（把 fixture 的 `status` 改回 `planned`），因为当时的断言只读了
 **服务端**的状态、没读 fixture 自己的——已补上 fixture 侧断言。
 **又一条「比对只读一侧就看不见另一侧漂移」。**
 
@@ -499,12 +485,11 @@ GitHub 上的酒店价格方案，并选定「国内强」的 **道旅 / Rolling
   **不假设单一布局**：在若干可能的 key 中定位数组，把命中的 key 记进
   `request_context.payload_key`，没有任何 key 命中时返回空——**不编造**。
   `scripts/probe_rollinggo_shape.py` 是让这个假设变成事实的**唯一**办法。
-  **下一次对话不要把它写成"已完成验证"。**
-- 用户尚未提供真实 RollingGo Key。
+  **不要把它写成"已完成验证"。**
+- **尚未用真实 Key 验证过。**
 
 ### 下一步（接 §11）
 
 1. 拿到真实 Key 后跑 `python scripts/probe_rollinggo_shape.py`，用输出校正
    `HOTEL_LIST_KEYS` / `ROOM_LIST_KEYS` 与 `getHotelDetail` 的参数名
-2. 网络恢复后 `git push`（现在有 5 个旧提交 + 本轮的改动）
-3. 第二个酒店来源与跨源实体解析（阶段 3）
+2. 第二个酒店来源与跨源实体解析（阶段 3）
